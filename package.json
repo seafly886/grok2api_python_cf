@@ -1,0 +1,52 @@
+{
+  "name": "grok-api-workers",
+  "version": "1.0.0",
+  "description": "Grok API proxy service built on Cloudflare Workers",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "npm run check && wrangler deploy",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:force": "wrangler deploy",
+    "tail": "wrangler tail",
+    "kv:create": "wrangler kv:namespace create KV_STORE",
+    "kv:create:preview": "wrangler kv:namespace create KV_STORE --preview",
+    "kv:list": "wrangler kv:key list --binding KV_STORE",
+    "kv:get": "wrangler kv:key get --binding KV_STORE",
+    "kv:put": "wrangler kv:key put --binding KV_STORE",
+    "kv:delete": "wrangler kv:key delete --binding KV_STORE",
+    "check": "node scripts/pre-deploy-check.js",
+    "test": "node test/config-test.js",
+    "test:config": "node test/config-test.js",
+    "lint": "eslint src/",
+    "format": "prettier --write src/"
+  },
+  "keywords": [
+    "grok",
+    "api",
+    "proxy",
+    "cloudflare",
+    "workers",
+    "openai",
+    "ai"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240129.0",
+    "wrangler": "^3.28.2",
+    "eslint": "^8.56.0",
+    "prettier": "^3.2.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/grok-api-workers.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/grok-api-workers/issues"
+  },
+  "homepage": "https://github.com/your-username/grok-api-workers#readme"
+}

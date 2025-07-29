@@ -1,0 +1,30 @@
+name = "grok-api-workers"
+main = "src/index.js"
+compatibility_date = "2025-01-29"
+compatibility_flags = ["nodejs_compat"]
+
+# KV 存储绑定
+[[kv_namespaces]]
+binding = "KV_STORE"
+id = "your-kv-namespace-id"
+preview_id = "your-preview-kv-namespace-id"
+
+# 环境变量 (非敏感)
+[vars]
+# 基础配置
+IS_TEMP_CONVERSATION = "true"
+IS_CUSTOM_SSO = "false"
+SHOW_THINKING = "false"
+ISSHOW_SEARCH_RESULTS = "true"
+IS_SUPER_GROK = "false"
+MANAGER_SWITCH = "true"
+
+# API 配置
+API_KEY = "123456"
+ADMINPASSWORD = "ts-123456"
+
+# 可选配置 (如果不使用图床可以留空)
+# PICGO_KEY = ""
+# TUMY_KEY = ""
+# CF_CLEARANCE = ""
+# PROXY = ""
