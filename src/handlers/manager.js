@@ -49,46 +49,124 @@ export class ManagerHandler {
   }
 
   async checkAuth(request) {
-    // Simple session-based auth
-    const sessionCookie = this.getCookie(request, 'session');
-    if (!sessionCookie) return false;
-    
     try {
+      // Simple session-based auth
+      const sessionCookie = this.getCookie(request, 'session');
+      this.logger.info('Auth check - session cookie found:', !!sessionCookie);
+
+      if (!sessionCookie) {
+        this.logger.info('Auth check failed: no session cookie');
+        return false;
+      }
+
+      this.logger.info('Auth check - session cookie length:', sessionCookie.length);
+
       // In a real implementation, you'd verify the session token
       // For now, just check if it exists and matches expected format
-      return sessionCookie.length > 10;
-    } catch {
+      const isValid = sessionCookie.length > 10;
+      this.logger.info('Auth check result:', isValid);
+
+      return isValid;
+    } catch (error) {
+      this.logger.error('Auth check error:', error);
       return false;
     }
   }
 
   getCookie(request, name) {
-    const cookieHeader = request.headers.get('Cookie');
-    if (!cookieHeader) return null;
-    
-    const cookies = cookieHeader.split(';').map(c => c.trim());
-    for (const cookie of cookies) {
-      const [key, value] = cookie.split('=');
-      if (key === name) return value;
+    try {
+      const cookieHeader = request.headers.get('Cookie');
+      this.logger.info('Cookie header:', cookieHeader ? 'present' : 'missing');
+
+      if (!cookieHeader) return null;
+
+      const cookies = cookieHeader.split(';').map(c => c.trim());
+      this.logger.info('Parsed cookies count:', cookies.length);
+
+      for (const cookie of cookies) {
+        const [key, value] = cookie.split('=');
+        if (key === name) {
+          this.logger.info(`Found cookie ${name}:`, value ? 'present' : 'empty');
+          return value;
+        }
+      }
+
+      this.logger.info(`Cookie ${name} not found`);
+      return null;
+    } catch (error) {
+      this.logger.error('Error parsing cookies:', error);
+      return null;
     }
-    return null;
   }
 
   async handleLogin(request) {
     try {
-      const { password } = await request.json();
+      this.logger.info('Login attempt started');
+
+      // 记录请求详情
+      const contentType = request.headers.get('content-type');
+      this.logger.info('Request content-type:', contentType);
+
+      // 检查请求体
+      let requestBody;
+      try {
+        requestBody = await request.text();
+        this.logger.info('Request body received, length:', requestBody.length);
+      } catch (bodyError) {
+        this.logger.error('Failed to read request body:', bodyError);
+        return new Response(JSON.stringify({ error: 'Invalid request body' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      // 解析 JSON
+      let password;
+      try {
+        const parsed = JSON.parse(requestBody);
+        password = parsed.password;
+        this.logger.info('JSON parsed successfully');
+      } catch (jsonError) {
+        this.logger.error('Failed to parse JSON:', jsonError);
+        return new Response(JSON.stringify({ error: 'Invalid JSON format' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
       const adminPassword = this.config.adminPassword;
-      
-      if (password === adminPassword) {
+
+      // 记录密码验证详情（不记录实际密码）
+      this.logger.info('Password received length:', password ? password.length : 0);
+      this.logger.info('Admin password configured length:', adminPassword ? adminPassword.length : 0);
+      this.logger.info('Password type:', typeof password);
+      this.logger.info('Admin password type:', typeof adminPassword);
+
+      // 确保密码是字符串并进行比较
+      const passwordStr = String(password || '').trim();
+      const adminPasswordStr = String(adminPassword || '').trim();
+      const isMatch = passwordStr === adminPasswordStr;
+
+      this.logger.info('Password match:', isMatch);
+      this.logger.info('Trimmed password length:', passwordStr.length);
+      this.logger.info('Trimmed admin password length:', adminPasswordStr.length);
+
+      if (isMatch && passwordStr.length > 0) {
         const sessionToken = crypto.randomUUID();
-        
+        this.logger.info('Login successful, session token generated:', sessionToken.substring(0, 8) + '...');
+
+        // 根据请求协议决定是否使用 Secure 标志
+        const isHttps = request.url.startsWith('https://');
+        const cookieFlags = isHttps ? 'HttpOnly; Secure; SameSite=Strict' : 'HttpOnly; SameSite=Strict';
+
         return new Response(JSON.stringify({ success: true }), {
           headers: {
             'Content-Type': 'application/json',
-            'Set-Cookie': `session=${sessionToken}; HttpOnly; Secure; SameSite=Strict; Max-Age=86400`
+            'Set-Cookie': `session=${sessionToken}; ${cookieFlags}; Max-Age=86400; Path=/`
           }
         });
       } else {
+        this.logger.info('Login failed: password mismatch or empty password');
         return new Response(JSON.stringify({ error: 'Invalid password' }), {
           status: 401,
           headers: { 'Content-Type': 'application/json' }
@@ -96,7 +174,8 @@ export class ManagerHandler {
       }
     } catch (error) {
       this.logger.error('Login error:', error);
-      return new Response(JSON.stringify({ error: 'Login failed' }), {
+      this.logger.error('Error stack:', error.stack);
+      return new Response(JSON.stringify({ error: 'Login failed', details: error.message }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' }
       });
@@ -292,22 +371,33 @@ export class ManagerHandler {
             e.preventDefault();
             const password = document.getElementById('password').value;
             const errorDiv = document.getElementById('error');
-            
+
+            console.log('Login form submitted');
+            console.log('Password length:', password ? password.length : 0);
+
             try {
+                console.log('Sending login request to /manager/api/login');
                 const response = await fetch('/manager/api/login', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ password })
                 });
-                
+
+                console.log('Response status:', response.status);
+                console.log('Response headers:', Object.fromEntries(response.headers.entries()));
+
                 const result = await response.json();
-                
+                console.log('Response data:', result);
+
                 if (result.success) {
+                    console.log('Login successful, redirecting to /manager');
                     window.location.href = '/manager';
                 } else {
+                    console.log('Login failed:', result.error);
                     errorDiv.textContent = result.error || '登录失败';
                 }
             } catch (error) {
+                console.error('Login request failed:', error);
                 errorDiv.textContent = '网络错误，请重试';
             }
         });
