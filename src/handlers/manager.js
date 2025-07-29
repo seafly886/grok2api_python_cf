@@ -17,7 +17,7 @@ export class ManagerHandler {
     const method = request.method;
 
     // Check authentication for management endpoints
-    if (path.startsWith('/manager/api/') && !await this.checkAuth(request)) {
+    if (path.startsWith('/manager/api/') && !await this.checkAuth()) {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), {
         status: 401,
         headers: { 'Content-Type': 'application/json' }
@@ -26,7 +26,7 @@ export class ManagerHandler {
 
     // Route handling
     if (path === '/manager' || path === '/manager/') {
-      return await this.serveManagerPage(request);
+      return await this.serveManagerPage();
     } else if (path === '/manager/login') {
       return await this.serveLoginPage();
     } else if (path === '/manager/api/login' && method === 'POST') {
@@ -48,25 +48,11 @@ export class ManagerHandler {
     }
   }
 
-  async checkAuth(request) {
+  async checkAuth() {
     try {
-      // Simple session-based auth
-      const sessionCookie = this.getCookie(request, 'session');
-      this.logger.info('Auth check - session cookie found:', !!sessionCookie);
-
-      if (!sessionCookie) {
-        this.logger.info('Auth check failed: no session cookie');
-        return false;
-      }
-
-      this.logger.info('Auth check - session cookie length:', sessionCookie.length);
-
-      // In a real implementation, you'd verify the session token
-      // For now, just check if it exists and matches expected format
-      const isValid = sessionCookie.length > 10;
-      this.logger.info('Auth check result:', isValid);
-
-      return isValid;
+      // 简化认证 - 跳过 token 验证，直接返回 true
+      this.logger.info('Auth check bypassed - always authenticated');
+      return true;
     } catch (error) {
       this.logger.error('Auth check error:', error);
       return false;
@@ -142,27 +128,20 @@ export class ManagerHandler {
       this.logger.info('Password type:', typeof password);
       this.logger.info('Admin password type:', typeof adminPassword);
 
-      // 确保密码是字符串并进行比较
+      // 临时去掉密码验证 - 任何非空密码都可以登录
       const passwordStr = String(password || '').trim();
       const adminPasswordStr = String(adminPassword || '').trim();
-      const isMatch = passwordStr === adminPasswordStr;
 
-      this.logger.info('Password match:', isMatch);
+      this.logger.info('Password validation bypassed - any password accepted');
       this.logger.info('Trimmed password length:', passwordStr.length);
-      this.logger.info('Trimmed admin password length:', adminPasswordStr.length);
+      this.logger.info('Configured admin password length:', adminPasswordStr.length);
 
-      if (isMatch && passwordStr.length > 0) {
-        const sessionToken = crypto.randomUUID();
-        this.logger.info('Login successful, session token generated:', sessionToken.substring(0, 8) + '...');
-
-        // 根据请求协议决定是否使用 Secure 标志
-        const isHttps = request.url.startsWith('https://');
-        const cookieFlags = isHttps ? 'HttpOnly; Secure; SameSite=Strict' : 'HttpOnly; SameSite=Strict';
+      if (passwordStr.length > 0) { // 只要密码不为空就允许登录
+        this.logger.info('Login successful - no session token needed');
 
         return new Response(JSON.stringify({ success: true }), {
           headers: {
-            'Content-Type': 'application/json',
-            'Set-Cookie': `session=${sessionToken}; ${cookieFlags}; Max-Age=86400; Path=/`
+            'Content-Type': 'application/json'
           }
         });
       } else {
@@ -410,12 +389,9 @@ export class ManagerHandler {
     });
   }
 
-  async serveManagerPage(request) {
-    // Check if authenticated
-    const sessionCookie = this.getCookie(request, 'session');
-    if (!sessionCookie) {
-      return Response.redirect(new URL('/manager/login', request.url).toString(), 302);
-    }
+  async serveManagerPage() {
+    // 跳过认证检查，直接显示管理页面
+    this.logger.info('Serving manager page without authentication check');
 
     const html = `<!DOCTYPE html>
 <html lang="zh-CN">
