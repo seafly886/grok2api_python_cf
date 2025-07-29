@@ -120,46 +120,115 @@ export class TokenManager {
   }
 
   /**
+   * Validate if token is a valid SSO token (including session tokens for web simulation)
+   */
+  isValidSSOToken(token) {
+    try {
+      // Handle tokens that start with sso=
+      let actualToken = token;
+      if (token.startsWith('sso=')) {
+        actualToken = token.substring(4); // Remove 'sso=' prefix
+      }
+
+      // Accept JWT tokens (including session tokens for web simulation)
+      if (actualToken.startsWith('eyJ')) {
+        // Try to decode JWT to validate format
+        const parts = actualToken.split('.');
+        if (parts.length === 3) {
+          try {
+            const payload = JSON.parse(atob(parts[1]));
+            // Accept both session tokens and other JWT tokens
+            if (payload.session_id) {
+              this.logger.info('Accepted session token for web simulation:', token.substring(0, 20));
+              return true;
+            }
+            // Accept other JWT payloads as well
+            this.logger.info('Accepted JWT token:', token.substring(0, 20));
+            return true;
+          } catch (e) {
+            // If we can't decode, treat as invalid
+            this.logger.info('Invalid JWT token format:', token.substring(0, 20));
+            return false;
+          }
+        } else {
+          this.logger.info('Invalid JWT structure:', token.substring(0, 20));
+          return false;
+        }
+      }
+
+      // Accept cookie format tokens that contain sso=
+      if (token.includes('sso=')) {
+        this.logger.info('Accepted SSO cookie token:', token.substring(0, 20));
+        return true;
+      }
+
+      // Accept direct JWT tokens without sso= prefix
+      if (token.startsWith('eyJ')) {
+        const parts = token.split('.');
+        if (parts.length === 3) {
+          try {
+            JSON.parse(atob(parts[1])); // Validate JWT format
+            this.logger.info('Accepted direct JWT token:', token.substring(0, 20));
+            return true;
+          } catch (e) {
+            this.logger.info('Invalid direct JWT format:', token.substring(0, 20));
+            return false;
+          }
+        }
+      }
+
+      // Reject other formats
+      this.logger.info('Unsupported token format:', token.substring(0, 20));
+      return false;
+    } catch (error) {
+      this.logger.error('Token validation error:', error);
+      return false;
+    }
+  }
+
+  /**
    * Add token to the system
    */
   async addToken(tokenData) {
     try {
       const { type, token } = tokenData;
-      const modelConfig = type === 'super' ? this.modelSuperConfig : this.modelNormalConfig;
 
-      const sso = token.split('sso=')[1].split(';')[0];
+      // Validate token format
+      if (!this.isValidSSOToken(token)) {
+        this.logger.info('Invalid or unsupported token format rejected');
+        return { success: false, error: 'INVALID_TOKEN_FORMAT' };
+      }
+
+      const sso = this.extractSSO(token);
       const pools = await this.getTokenPools();
       const status = await this.getTokenStatus();
 
-      // 检查 token 是否已经存在于任何模型中
-      let tokenExists = false;
-      for (const model of Object.keys(modelConfig)) {
-        if (pools[model] && pools[model].find(entry => entry.token === token)) {
-          tokenExists = true;
-          break;
-        }
+      // Use a single pool for all tokens
+      const poolName = 'default_pool';
+      if (!pools[poolName]) {
+        pools[poolName] = [];
       }
 
-      if (tokenExists) {
+      // Check if token already exists
+      if (pools[poolName].find(entry => entry.token === token)) {
         this.logger.info(`Token already exists: ${sso}`);
-        return false; // 返回 false 表示 token 已存在
+        return { success: false, error: 'TOKEN_ALREADY_EXISTS' };
       }
 
-      // Initialize pools and status for all models
+      pools[poolName].push({
+        token,
+        type,
+        AddedTime: Date.now(),
+        RequestCount: 0,
+        StartCallTime: null,
+      });
+
+      // Initialize status for all models
+      const modelConfig = type === 'super' ? this.modelSuperConfig : this.modelNormalConfig;
+      if (!status[sso]) {
+        status[sso] = {};
+      }
       for (const model of Object.keys(modelConfig)) {
-        if (!pools[model]) pools[model] = [];
-        if (!status[sso]) status[sso] = {};
-
-        // 为每个模型添加 token（但每个 token 只添加一次）
-        pools[model].push({
-          token,
-          MaxRequestCount: modelConfig[model].RequestFrequency,
-          RequestCount: 0,
-          AddedTime: Date.now(),
-          StartCallTime: null,
-          type
-        });
-
         if (!status[sso][model]) {
           status[sso][model] = {
             isValid: true,
@@ -174,11 +243,31 @@ export class TokenManager {
       await this.saveTokenStatus(status);
 
       this.logger.info(`Token added successfully: ${sso}`);
-      return true;
+      return { success: true };
     } catch (error) {
       this.logger.error('Failed to add token:', error);
-      return false;
+      return { success: false, error: 'INTERNAL_ERROR', details: error.message };
     }
+  }
+
+  async addBatchTokens(type, tokens) {
+    let added = 0;
+    let skipped = 0;
+    let invalidFormat = 0;
+
+    for (const token of tokens) {
+      if (token.trim() === '') continue;
+      const result = await this.addToken({ type, token });
+      if (result.success) {
+        added++;
+      } else {
+        if (result.error === 'INVALID_TOKEN_FORMAT') {
+          invalidFormat++;
+        }
+        skipped++;
+      }
+    }
+    return { added, skipped, invalidFormat };
   }
 
   /**
@@ -189,13 +278,14 @@ export class TokenManager {
       const normalizedModel = this.normalizeModelName(modelId);
       const pools = await this.getTokenPools();
       const config = await this.getConfig();
-      
-      if (!pools[normalizedModel] || pools[normalizedModel].length === 0) {
+      const poolName = 'default_pool';
+
+      if (!pools[poolName] || pools[poolName].length === 0) {
         return null;
       }
       
       if (isReturn) {
-        return pools[normalizedModel][0]?.token || null;
+        return pools[poolName][0]?.token || null;
       }
       
       if (config.keyMode === 'single') {
@@ -213,12 +303,13 @@ export class TokenManager {
    * Polling mode token selection (use each token once then rotate)
    */
   async _getNextTokenPollingMode(normalizedModel, pools) {
-    const modelTokens = pools[normalizedModel];
+    const poolName = 'default_pool';
+    const modelTokens = pools[poolName];
     if (!modelTokens || modelTokens.length === 0) return null;
     
     const tokenEntry = modelTokens[0];
     const token = tokenEntry.token;
-    const sso = token.split('sso=')[1].split(';')[0];
+    const sso = this.extractSSO(token);
     
     // Set start time if first use
     if (!tokenEntry.StartCallTime) {
@@ -259,7 +350,8 @@ export class TokenManager {
    * Single key mode token selection
    */
   async _getNextTokenSingleMode(normalizedModel, pools, config) {
-    const modelTokens = pools[normalizedModel];
+    const poolName = 'default_pool';
+    const modelTokens = pools[poolName];
     if (!modelTokens || modelTokens.length === 0) return null;
     
     // Get current usage from KV
@@ -286,7 +378,7 @@ export class TokenManager {
     }
     
     // Update status
-    const sso = token.split('sso=')[1].split(';')[0];
+    const sso = this.extractSSO(token);
     const status = await this.getTokenStatus();
     if (status[sso] && status[sso][normalizedModel]) {
       status[sso][normalizedModel].totalRequestCount += 1;
@@ -303,27 +395,96 @@ export class TokenManager {
   }
 
   /**
+   * Extract SSO value from token
+   */
+  extractSSO(token) {
+    try {
+      // Handle JWT tokens (like session tokens)
+      if (token.startsWith('eyJ')) {
+        // For JWT tokens, use the token itself as identifier (first 20 chars)
+        return token.substring(0, 20);
+      }
+
+      // Handle regular cookie format tokens
+      if (token.includes('sso=')) {
+        return token.split('sso=')[1].split(';')[0];
+      }
+
+      // Fallback: use first 20 characters as identifier
+      return token.substring(0, 20);
+    } catch (error) {
+      this.logger.error('Failed to extract SSO:', error);
+      return 'unknown';
+    }
+  }
+
+  /**
    * Delete a token
    */
   async deleteToken(token) {
     try {
-      const sso = token.split('sso=')[1].split(';')[0];
+      const sso = this.extractSSO(token);
       const pools = await this.getTokenPools();
       const status = await this.getTokenStatus();
-      
-      // Remove from all model pools
-      for (const model of Object.keys(pools)) {
-        pools[model] = pools[model].filter(entry => entry.token !== token);
+      let tokenFound = false;
+
+      // Remove from new structure (default_pool)
+      const poolName = 'default_pool';
+      if (pools[poolName]) {
+        const originalLength = pools[poolName].length;
+        pools[poolName] = pools[poolName].filter(entry => entry.token !== token);
+        if (pools[poolName].length < originalLength) {
+          tokenFound = true;
+          this.logger.info(`Token removed from default_pool: ${sso}`);
+        }
       }
-      
+
+      // Remove from old structure (individual model pools)
+      for (const modelName of Object.keys(this.modelSuperConfig)) {
+        if (pools[modelName]) {
+          const originalLength = pools[modelName].length;
+          pools[modelName] = pools[modelName].filter(entry => entry.token !== token);
+          if (pools[modelName].length < originalLength) {
+            tokenFound = true;
+            this.logger.info(`Token removed from ${modelName} pool: ${sso}`);
+          }
+        }
+      }
+
+      // Also check for any other pools that might exist
+      for (const poolKey of Object.keys(pools)) {
+        if (poolKey !== 'default_pool' && !this.modelSuperConfig[poolKey]) {
+          if (Array.isArray(pools[poolKey])) {
+            const originalLength = pools[poolKey].length;
+            pools[poolKey] = pools[poolKey].filter(entry => entry.token !== token);
+            if (pools[poolKey].length < originalLength) {
+              tokenFound = true;
+              this.logger.info(`Token removed from ${poolKey} pool: ${sso}`);
+            }
+          }
+        }
+      }
+
+      if (!tokenFound) {
+        this.logger.info(`Token not found in any pool: ${sso}`);
+        return false;
+      }
+
       // Remove from status
       if (status[sso]) {
         delete status[sso];
+        this.logger.info(`Token status removed: ${sso}`);
       }
-      
-      await this.saveTokenPools(pools);
-      await this.saveTokenStatus(status);
-      
+
+      // Save changes
+      const poolsSaved = await this.saveTokenPools(pools);
+      const statusSaved = await this.saveTokenStatus(status);
+
+      if (!poolsSaved || !statusSaved) {
+        this.logger.error('Failed to save token pools or status');
+        return false;
+      }
+
       this.logger.info(`Token deleted successfully: ${sso}`);
       return true;
     } catch (error) {
@@ -388,6 +549,148 @@ export class TokenManager {
       return cleaned;
     } catch (error) {
       this.logger.error('Failed to cleanup duplicate tokens:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Create a new session
+   */
+  async createSession(sessionToken) {
+    try {
+      // Sessions expire in 24 hours
+      await this.kv.put(`session:${sessionToken}`, 'true', { expirationTtl: 86400 });
+      this.logger.info('Session created:', sessionToken.substring(0, 8));
+      return true;
+    } catch (error) {
+      this.logger.error('Failed to create session:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Check if a session is valid
+   */
+  async isValidSession(sessionToken) {
+    try {
+      const session = await this.kv.get(`session:${sessionToken}`);
+      return session === 'true';
+    } catch (error) {
+      this.logger.error('Failed to validate session:', error);
+      return false;
+    }
+  }
+/**
+   * Reset token usage counts
+   */
+  async resetTokenUsage() {
+    try {
+      const pools = await this.getTokenPools();
+      const poolName = 'default_pool';
+      if (pools[poolName]) {
+        for (const token of pools[poolName]) {
+          token.RequestCount = 0;
+        }
+        await this.saveTokenPools(pools);
+        this.logger.info('Token usage reset successfully.');
+      }
+    } catch (error) {
+      this.logger.error('Failed to reset token usage:', error);
+    }
+  }
+
+  /**
+   * Clean up invalid tokens (tokens with invalid format or structure)
+   */
+  async cleanupInvalidTokens() {
+    try {
+      const pools = await this.getTokenPools();
+      const status = await this.getTokenStatus();
+      let cleaned = false;
+
+      // Clean up new structure (default_pool)
+      const poolName = 'default_pool';
+      if (pools[poolName]) {
+        const validTokens = [];
+
+        for (const tokenEntry of pools[poolName]) {
+          if (this.isValidSSOToken(tokenEntry.token)) {
+            validTokens.push(tokenEntry);
+          } else {
+            const sso = this.extractSSO(tokenEntry.token);
+            this.logger.info(`Removing invalid token from default_pool: ${sso}`);
+
+            // Remove from status as well
+            if (status[sso]) {
+              delete status[sso];
+            }
+
+            cleaned = true;
+          }
+        }
+
+        pools[poolName] = validTokens;
+      }
+
+      // Clean up old structure (individual model pools)
+      for (const modelName of Object.keys(this.modelSuperConfig)) {
+        if (pools[modelName] && Array.isArray(pools[modelName])) {
+          const validTokens = [];
+
+          for (const tokenEntry of pools[modelName]) {
+            if (this.isValidSSOToken(tokenEntry.token)) {
+              validTokens.push(tokenEntry);
+            } else {
+              const sso = this.extractSSO(tokenEntry.token);
+              this.logger.info(`Removing invalid token from ${modelName} pool: ${sso}`);
+
+              // Remove from status as well
+              if (status[sso]) {
+                delete status[sso];
+              }
+
+              cleaned = true;
+            }
+          }
+
+          pools[modelName] = validTokens;
+        }
+      }
+
+      // Clean up any other pools that might exist
+      for (const poolKey of Object.keys(pools)) {
+        if (poolKey !== 'default_pool' && !this.modelSuperConfig[poolKey] && Array.isArray(pools[poolKey])) {
+          const validTokens = [];
+
+          for (const tokenEntry of pools[poolKey]) {
+            if (this.isValidSSOToken(tokenEntry.token)) {
+              validTokens.push(tokenEntry);
+            } else {
+              const sso = this.extractSSO(tokenEntry.token);
+              this.logger.info(`Removing invalid token from ${poolKey} pool: ${sso}`);
+
+              // Remove from status as well
+              if (status[sso]) {
+                delete status[sso];
+              }
+
+              cleaned = true;
+            }
+          }
+
+          pools[poolKey] = validTokens;
+        }
+      }
+
+      if (cleaned) {
+        await this.saveTokenPools(pools);
+        await this.saveTokenStatus(status);
+        this.logger.info('Invalid tokens cleaned up successfully');
+      }
+
+      return cleaned;
+    } catch (error) {
+      this.logger.error('Failed to cleanup invalid tokens:', error);
       return false;
     }
   }

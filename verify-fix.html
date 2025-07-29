@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>验证JWT Token修复</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        button {
+            background: #007cba;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background: #005a87;
+        }
+        .cleanup-btn {
+            background: #dc3545;
+        }
+        .cleanup-btn:hover {
+            background: #c82333;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .info {
+            background: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+        }
+        .warning {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+        }
+        .status {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+        .status.valid {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.invalid {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .token-item {
+            border: 1px solid #ddd;
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .session-token {
+            border-color: #dc3545;
+            background: #f8f9fa;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔧 JWT Token修复验证工具</h1>
+        <p>这个工具可以帮助验证JWT token删除问题的修复效果</p>
+        
+        <div>
+            <button onclick="checkTokens()">📋 检查当前Token</button>
+            <button onclick="checkStatus()">📊 检查Token状态</button>
+            <button onclick="cleanupInvalid()" class="cleanup-btn">🧹 清理无效Token</button>
+            <button onclick="cleanupDuplicate()" class="cleanup-btn">🔄 清理重复Token</button>
+        </div>
+        
+        <div id="result" class="result" style="display: none;"></div>
+    </div>
+
+    <script>
+        function showResult(message, type = 'info') {
+            const resultDiv = document.getElementById('result');
+            resultDiv.textContent = message;
+            resultDiv.className = `result ${type}`;
+            resultDiv.style.display = 'block';
+        }
+
+        async function checkTokens() {
+            try {
+                showResult('正在检查当前token...', 'info');
+                
+                const response = await fetch('/manager/api/tokens');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                let message = '📊 当前Token检查结果:\n\n';
+                let hasSessionToken = false;
+                let totalTokens = 0;
+                
+                if (data.pools) {
+                    for (const [poolName, tokens] of Object.entries(data.pools)) {
+                        if (Array.isArray(tokens) && tokens.length > 0) {
+                            message += `🏊 ${poolName} 池: ${tokens.length} 个token\n`;
+                            totalTokens += tokens.length;
+                            
+                            tokens.forEach((tokenEntry, index) => {
+                                const token = tokenEntry.token;
+                                message += `\n  Token ${index + 1}:\n`;
+                                message += `    Token: ${token.substring(0, 50)}...\n`;
+                                message += `    类型: ${tokenEntry.type}\n`;
+                                message += `    请求次数: ${tokenEntry.RequestCount || 0}\n`;
+                                
+                                // 检查是否是session token
+                                if (token.startsWith('sso=')) {
+                                    const jwtPart = token.substring(4);
+                                    if (jwtPart.startsWith('eyJ')) {
+                                        try {
+                                            const parts = jwtPart.split('.');
+                                            if (parts.length === 3) {
+                                                const payload = JSON.parse(atob(parts[1]));
+                                                if (payload.session_id) {
+                                                    message += `    ⚠️  这是一个SESSION TOKEN！\n`;
+                                                    message += `    Session ID: ${payload.session_id}\n`;
+                                                    hasSessionToken = true;
+                                                }
+                                            }
+                                        } catch (e) {
+                                            message += `    ❌ JWT解码失败\n`;
+                                        }
+                                    }
+                                } else if (token.includes('sso=')) {
+                                    message += `    ✅ 正常的SSO cookie token\n`;
+                                } else {
+                                    message += `    ❓ 未知格式的token\n`;
+                                }
+                            });
+                            message += '\n';
+                        }
+                    }
+                } else {
+                    message += '📭 没有发现token池数据\n';
+                }
+                
+                message += `\n📈 统计信息:\n`;
+                message += `总Token数: ${totalTokens}\n`;
+                message += `Session Token: ${hasSessionToken ? '发现' : '未发现'}\n`;
+                
+                if (hasSessionToken) {
+                    message += `\n🚨 问题确认: 发现session token在SSO token池中\n`;
+                    message += `💡 解决方案: 点击"清理无效Token"按钮进行清理\n`;
+                    showResult(message, 'warning');
+                } else {
+                    message += `\n✅ 检查通过: 未发现session token\n`;
+                    showResult(message, 'success');
+                }
+                
+            } catch (error) {
+                showResult(`❌ 检查失败: ${error.message}`, 'error');
+            }
+        }
+
+        async function checkStatus() {
+            try {
+                showResult('正在检查token状态...', 'info');
+                
+                const response = await fetch('/manager/api/status');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                let message = '📊 Token状态检查结果:\n\n';
+                
+                if (data.status && Object.keys(data.status).length > 0) {
+                    for (const [sso, models] of Object.entries(data.status)) {
+                        message += `SSO: ${sso}\n`;
+                        
+                        for (const [model, status] of Object.entries(models)) {
+                            message += `  ${model}: `;
+                            message += `有效=${status.isValid ? '是' : '否'}, `;
+                            message += `请求数=${status.totalRequestCount || 0}\n`;
+                        }
+                        message += '\n';
+                    }
+                } else {
+                    message += '📭 没有发现token状态数据\n';
+                }
+                
+                showResult(message, 'info');
+                
+            } catch (error) {
+                showResult(`❌ 状态检查失败: ${error.message}`, 'error');
+            }
+        }
+
+        async function cleanupInvalid() {
+            try {
+                showResult('正在清理无效token...', 'info');
+                
+                const response = await fetch('/manager/api/cleanup-invalid', {
+                    method: 'POST'
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    const message = `✅ 清理完成!\n\n${result.message}\n\n清理状态: ${result.cleaned ? '有token被清理' : '没有发现需要清理的token'}\n\n建议: 重新检查token列表确认清理效果`;
+                    showResult(message, 'success');
+                } else {
+                    showResult(`❌ 清理失败: ${result.error}`, 'error');
+                }
+            } catch (error) {
+                showResult(`❌ 清理失败: ${error.message}`, 'error');
+            }
+        }
+
+        async function cleanupDuplicate() {
+            try {
+                showResult('正在清理重复token...', 'info');
+                
+                const response = await fetch('/manager/api/cleanup', {
+                    method: 'POST'
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    const message = `✅ 清理完成!\n\n${result.message}\n\n清理状态: ${result.cleaned ? '有token被清理' : '没有发现重复token'}\n\n建议: 重新检查token列表确认清理效果`;
+                    showResult(message, 'success');
+                } else {
+                    showResult(`❌ 清理失败: ${result.error}`, 'error');
+                }
+            } catch (error) {
+                showResult(`❌ 清理失败: ${error.message}`, 'error');
+            }
+        }
+
+        // 页面加载时自动检查
+        window.onload = function() {
+            checkTokens();
+        };
+    </script>
+</body>
+</html>

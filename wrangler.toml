@@ -28,3 +28,6 @@ ADMINPASSWORD = "ts-123456"
 # TUMY_KEY = ""
 # CF_CLEARANCE = ""
 # PROXY = ""
+
+[triggers]
+crons = ["0 */3 * * *"]

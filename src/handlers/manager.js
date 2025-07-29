@@ -16,12 +16,18 @@ export class ManagerHandler {
     const path = url.pathname;
     const method = request.method;
 
-    // Check authentication for management endpoints
-    if (path.startsWith('/manager/api/') && !await this.checkAuth()) {
-      return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json' }
-      });
+    // Check authentication for all manager paths except login
+    if (path.startsWith('/manager') && !path.startsWith('/manager/login') && !path.startsWith('/manager/api/login')) {
+      if (!await this.checkAuth(request)) {
+        if (path.startsWith('/manager/api/')) {
+          return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        } else {
+          return Response.redirect(new URL('/manager/login', request.url).toString(), 302);
+        }
+      }
     }
 
     // Route handling
@@ -37,6 +43,8 @@ export class ManagerHandler {
       return await this.addToken(request);
     } else if (path === '/manager/api/tokens' && method === 'DELETE') {
       return await this.deleteToken(request);
+    } else if (path === '/manager/api/tokens/batch' && method === 'POST') {
+      return await this.addBatchTokens(request);
     } else if (path === '/manager/api/key_mode' && method === 'GET') {
       return await this.getKeyMode();
     } else if (path === '/manager/api/key_mode' && method === 'POST') {
@@ -45,17 +53,22 @@ export class ManagerHandler {
       return await this.getStatus();
     } else if (path === '/manager/api/cleanup' && method === 'POST') {
       return await this.cleanupDuplicateTokens();
+    } else if (path === '/manager/api/cleanup-invalid' && method === 'POST') {
+      return await this.cleanupInvalidTokens();
     } else {
       return new Response('Not Found', { status: 404 });
     }
   }
 
-  async checkAuth() {
+  async checkAuth(request) {
     try {
-      // 去掉 token 验证，但保留认证检查接口
-      // 在这种模式下，所有 API 请求都被允许（因为我们不使用 session token）
-      this.logger.info('Auth check - token validation disabled, allowing access');
-      return true;
+      const sessionToken = this.getCookie(request, 'session');
+      if (sessionToken && await this.tokenManager.isValidSession(sessionToken)) {
+        this.logger.info('Auth check successful for session:', sessionToken.substring(0, 8));
+        return true;
+      }
+      this.logger.info('Auth check failed');
+      return false;
     } catch (error) {
       this.logger.error('Auth check error:', error);
       return false;
@@ -143,16 +156,17 @@ export class ManagerHandler {
 
       if (isMatch && passwordStr.length > 0) { // 密码必须匹配且不为空
         const sessionToken = crypto.randomUUID();
-        this.logger.info('Login successful, session token generated (but not used for auth):', sessionToken.substring(0, 8) + '...');
+        await this.tokenManager.createSession(sessionToken);
+        this.logger.info('Login successful, session token generated:', sessionToken.substring(0, 8) + '...');
 
-        // 设置 session cookie（虽然不用于验证，但保持兼容性）
+        // 设置 session cookie
         const isHttps = request.url.startsWith('https://');
         const cookieFlags = isHttps ? 'HttpOnly; Secure; SameSite=Strict' : 'HttpOnly; SameSite=Strict';
 
         return new Response(JSON.stringify({ success: true }), {
           headers: {
             'Content-Type': 'application/json',
-            'Set-Cookie': `session=${sessionToken}; ${cookieFlags}; Max-Age=86400; Path=/`
+            'Set-Cookie': `session=${sessionToken}; ${cookieFlags}; Max-Age=86400; Path=/manager`
           }
         });
       } else {
@@ -197,16 +211,32 @@ export class ManagerHandler {
       const tokenData = await request.json();
       this.logger.info('Adding token:', { type: tokenData.type, tokenLength: tokenData.token?.length });
 
-      const success = await this.tokenManager.addToken(tokenData);
+      const result = await this.tokenManager.addToken(tokenData);
 
-      if (success) {
+      if (result.success) {
         this.logger.info('Token added successfully');
         return new Response(JSON.stringify({ success: true }), {
           headers: { 'Content-Type': 'application/json' }
         });
       } else {
-        this.logger.info('Token already exists or failed to add');
-        return new Response(JSON.stringify({ error: 'Token already exists or failed to add' }), {
+        // Provide specific error messages based on error type
+        let errorMessage;
+        switch (result.error) {
+          case 'INVALID_TOKEN_FORMAT':
+            errorMessage = 'Invalid token format. Session tokens are not allowed. Please use valid SSO cookies.';
+            break;
+          case 'TOKEN_ALREADY_EXISTS':
+            errorMessage = 'Token already exists in the system.';
+            break;
+          case 'INTERNAL_ERROR':
+            errorMessage = `Internal error: ${result.details}`;
+            break;
+          default:
+            errorMessage = 'Failed to add token.';
+        }
+
+        this.logger.info('Token add failed:', result.error);
+        return new Response(JSON.stringify({ error: errorMessage }), {
           status: 400,
           headers: { 'Content-Type': 'application/json' }
         });
@@ -214,6 +244,22 @@ export class ManagerHandler {
     } catch (error) {
       this.logger.error('Add token error:', error);
       return new Response(JSON.stringify({ error: 'Failed to add token: ' + error.message }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  }
+
+  async addBatchTokens(request) {
+    try {
+      const { type, tokens } = await request.json();
+      const results = await this.tokenManager.addBatchTokens(type, tokens);
+      return new Response(JSON.stringify({ success: true, ...results }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (error) {
+      this.logger.error('Add batch tokens error:', error);
+      return new Response(JSON.stringify({ error: 'Failed to add batch tokens: ' + error.message }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' }
       });
@@ -297,19 +343,28 @@ export class ManagerHandler {
         modelStats: {}
       };
       
-      for (const [model, tokens] of Object.entries(pools)) {
-        stats.modelStats[model] = {
-          tokenCount: tokens.length,
-          totalRequests: tokens.reduce((sum, token) => sum + token.RequestCount, 0)
+      const poolName = 'default_pool';
+      if (pools[poolName]) {
+        stats.totalTokens = pools[poolName].length;
+        stats.modelStats['all_models'] = {
+          tokenCount: pools[poolName].length,
+          totalRequests: pools[poolName].reduce((sum, token) => sum + token.RequestCount, 0)
         };
-        stats.totalTokens += tokens.length;
       }
       
+      // Calculate valid tokens and total requests correctly
       for (const ssoStatus of Object.values(status)) {
-        for (const modelStatus of Object.values(ssoStatus)) {
-          if (modelStatus.isValid) stats.validTokens++;
-          stats.totalRequests += modelStatus.totalRequestCount;
+        // Check if this SSO token has any valid model status
+        const hasValidModel = Object.values(ssoStatus).some(modelStatus => modelStatus.isValid);
+        if (hasValidModel) {
+          stats.validTokens++;
         }
+
+        // Sum up total requests for this SSO token (avoid double counting)
+        const ssoTotalRequests = Object.values(ssoStatus).reduce((sum, modelStatus) =>
+          sum + (modelStatus.totalRequestCount || 0), 0
+        );
+        stats.totalRequests += ssoTotalRequests;
       }
       
       return new Response(JSON.stringify({
@@ -343,6 +398,27 @@ export class ManagerHandler {
     } catch (error) {
       this.logger.error('Cleanup duplicate tokens error:', error);
       return new Response(JSON.stringify({ error: 'Failed to cleanup duplicate tokens' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  }
+
+  async cleanupInvalidTokens() {
+    try {
+      this.logger.info('Starting invalid token cleanup');
+      const cleaned = await this.tokenManager.cleanupInvalidTokens();
+
+      return new Response(JSON.stringify({
+        success: true,
+        cleaned: cleaned,
+        message: cleaned ? 'Invalid tokens (like session tokens) cleaned up successfully' : 'No invalid tokens found'
+      }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (error) {
+      this.logger.error('Cleanup invalid tokens error:', error);
+      return new Response(JSON.stringify({ error: 'Failed to cleanup invalid tokens' }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' }
       });
@@ -426,8 +502,7 @@ export class ManagerHandler {
   }
 
   async serveManagerPage() {
-    // 跳过认证检查，直接显示管理页面
-    this.logger.info('Serving manager page without authentication check');
+    this.logger.info('Serving manager page');
 
     const html = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -510,7 +585,15 @@ export class ManagerHandler {
             </div>
             <button onclick="addToken()">添加 Token</button>
         </div>
-        
+
+        <div class="section">
+            <h2>Token 管理</h2>
+            <div class="form-group">
+                <button onclick="cleanupInvalidTokens()">清理无效Token</button>
+                <button onclick="cleanupDuplicateTokens()">清理重复Token</button>
+            </div>
+        </div>
+
         <div class="section">
             <h2>Token 列表</h2>
             <div id="tokenList" class="token-list">
@@ -689,7 +772,20 @@ export class ManagerHandler {
                 }
                 
                 for (const token of allTokens) {
-                    const sso = token.split('sso=')[1]?.split(';')[0] || 'unknown';
+                    // Extract SSO using the same logic as TokenManager
+                    let sso;
+                    try {
+                        if (token.startsWith('eyJ')) {
+                            sso = token.substring(0, 20);
+                        } else if (token.includes('sso=')) {
+                            sso = token.split('sso=')[1].split(';')[0];
+                        } else {
+                            sso = token.substring(0, 20);
+                        }
+                    } catch (error) {
+                        sso = 'unknown';
+                    }
+
                     const isValid = Object.values(data.status[sso] || {}).some(s => s.isValid);
                     const totalRequests = Object.values(data.status[sso] || {}).reduce((sum, s) => sum + s.totalRequestCount, 0);
                     
@@ -707,6 +803,50 @@ export class ManagerHandler {
             } catch (error) {
                 console.error('Failed to load tokens:', error);
                 document.getElementById('tokenList').innerHTML = '<p>加载失败</p>';
+            }
+        }
+
+        // 清理无效Token
+        async function cleanupInvalidTokens() {
+            try {
+                const response = await fetch('/manager/api/cleanup-invalid', {
+                    method: 'POST'
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    alert(result.message);
+                    loadTokens(); // 重新加载token列表
+                    loadStatus(); // 重新加载状态
+                } else {
+                    alert('清理失败: ' + result.error);
+                }
+            } catch (error) {
+                console.error('Cleanup invalid tokens failed:', error);
+                alert('清理失败: ' + error.message);
+            }
+        }
+
+        // 清理重复Token
+        async function cleanupDuplicateTokens() {
+            try {
+                const response = await fetch('/manager/api/cleanup', {
+                    method: 'POST'
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    alert(result.message);
+                    loadTokens(); // 重新加载token列表
+                    loadStatus(); // 重新加载状态
+                } else {
+                    alert('清理失败: ' + result.error);
+                }
+            } catch (error) {
+                console.error('Cleanup duplicate tokens failed:', error);
+                alert('清理失败: ' + error.message);
             }
         }
     </script>

@@ -248,15 +248,27 @@ export class HttpClient {
   /**
    * Validate and extract SSO token
    */
-  extractSSO(cookieString) {
+  extractSSO(token) {
     try {
-      const ssoMatch = cookieString.match(/sso=([^;]+)/);
-      if (!ssoMatch) {
-        throw new Error('No SSO token found in cookie string');
+      // Handle JWT tokens (like session tokens)
+      if (token.startsWith('eyJ')) {
+        // For JWT tokens, use the token itself as identifier (first 20 chars)
+        return token.substring(0, 20);
       }
-      return ssoMatch[1];
+
+      // Handle regular cookie format tokens
+      if (token.includes('sso=')) {
+        const ssoMatch = token.match(/sso=([^;]+)/);
+        if (!ssoMatch) {
+          throw new Error('No SSO token found in cookie string');
+        }
+        return ssoMatch[1];
+      }
+
+      // Fallback: use first 20 characters as identifier
+      return token.substring(0, 20);
     } catch (error) {
-      throw new Error(`Invalid cookie format: ${error.message}`);
+      throw new Error(`Invalid token format: ${error.message}`);
     }
   }
 

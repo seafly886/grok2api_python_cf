@@ -44,5 +44,13 @@ export default {
         headers: { 'Content-Type': 'application/json' }
       });
     }
+  },
+
+  async scheduled(event, env, ctx) {
+    const logger = new Logger();
+    const tokenManager = new TokenManager(env.KV_STORE, logger);
+    logger.info('Running scheduled task to reset token usage...');
+    await tokenManager.resetTokenUsage();
+    logger.info('Token usage reset complete.');
   }
 };

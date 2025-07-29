@@ -42,15 +42,20 @@ async function checkAuth() {
         const response = await fetch('/manager/api/status');
         if (response.status === 401) {
             window.location.href = '/manager/login';
-            return;
+            // Throw an error to stop further execution
+            throw new Error('Unauthorized');
         }
         if (!response.ok) {
-            throw new Error('认证检查失败');
+            throw new Error(`认证检查失败: ${response.statusText}`);
         }
     } catch (error) {
-        console.error('认证检查错误:', error);
-        // 如果是网络错误，可能是未登录，重定向到登录页
-        window.location.href = '/manager/login';
+        console.error('认证检查错误:', error.message);
+        // Redirect to login page if auth fails
+        if (error.message === 'Unauthorized' || error instanceof TypeError) {
+             window.location.href = '/manager/login';
+        }
+        // Re-throw the error to be caught by initializePage
+        throw error;
     }
 }
 
@@ -288,6 +293,38 @@ async function addToken() {
     }
 }
 
+async function addBatchTokens() {
+    const type = document.getElementById('batchTokenType').value;
+    const tokens = document.getElementById('batchTokenValue').value.trim().split('\n');
+    
+    if (tokens.length === 0 || (tokens.length === 1 && tokens[0] === '')) {
+        showNotification('请输入至少一个 Token', 'warning');
+        return;
+    }
+    
+    try {
+        const response = await fetch('/manager/api/tokens/batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type, tokens })
+        });
+        
+        if (!response.ok) throw new Error('批量添加Token失败');
+        
+        const result = await response.json();
+        if (result.success) {
+            showNotification(`成功添加 ${result.added} 个 Token，跳过 ${result.skipped} 个已存在的 Token`, 'success');
+            document.getElementById('batchTokenValue').value = '';
+            await Promise.all([loadTokens(), loadStatus()]);
+        } else {
+            throw new Error(result.error || '批量添加失败');
+        }
+    } catch (error) {
+        console.error('批量添加Token失败:', error);
+        showNotification('批量添加Token失败: ' + error.message, 'error');
+    }
+}
+
 // 删除Token
 async function deleteToken(token) {
     showConfirmDialog(
@@ -346,21 +383,18 @@ function updateTokenList(data) {
     const tokenList = document.getElementById('tokenList');
     if (!tokenList) return;
     
-    // 收集所有唯一的token
-    const allTokens = new Set();
-    for (const tokens of Object.values(data.pools || {})) {
-        for (const tokenEntry of tokens) {
-            allTokens.add(tokenEntry.token);
-        }
-    }
+    // 获取默认池中的所有令牌
+    const poolName = 'default_pool';
+    const tokens = data.pools && data.pools[poolName] ? data.pools[poolName] : [];
     
-    if (allTokens.size === 0) {
+    if (tokens.length === 0) {
         tokenList.innerHTML = '<div class="loading-placeholder"><p>暂无 Token</p></div>';
         return;
     }
     
     let html = '';
-    for (const token of allTokens) {
+    for (const tokenEntry of tokens) {
+        const token = tokenEntry.token;
         const sso = extractSSO(token);
         const tokenStatus = data.status[sso] || {};
         
@@ -368,7 +402,7 @@ function updateTokenList(data) {
         const modelStatuses = Object.values(tokenStatus);
         const isValid = modelStatuses.some(s => s.isValid);
         const totalRequests = modelStatuses.reduce((sum, s) => sum + (s.totalRequestCount || 0), 0);
-        const isSuper = modelStatuses.some(s => s.isSuper);
+        const isSuper = tokenEntry.type === 'super';
         
         // 计算各模型的请求数
         const modelDetails = Object.entries(tokenStatus).map(([model, status]) => ({
@@ -415,10 +449,22 @@ function updateTokenList(data) {
 }
 
 // 提取SSO
-function extractSSO(cookieString) {
+function extractSSO(token) {
     try {
-        const match = cookieString.match(/sso=([^;]+)/);
-        return match ? match[1].substring(0, 20) + '...' : 'unknown';
+        // Handle JWT tokens (like session tokens)
+        if (token.startsWith('eyJ')) {
+            // For JWT tokens, use the token itself as identifier (first 20 chars)
+            return token.substring(0, 20) + '...';
+        }
+
+        // Handle regular cookie format tokens
+        if (token.includes('sso=')) {
+            const match = token.match(/sso=([^;]+)/);
+            return match ? match[1].substring(0, 20) + '...' : 'unknown';
+        }
+
+        // Fallback: use first 20 characters as identifier
+        return token.substring(0, 20) + '...';
     } catch {
         return 'unknown';
     }
@@ -509,7 +555,7 @@ async function logout() {
         '确定要退出登录吗？',
         () => {
             // 清除cookie并重定向
-            document.cookie = 'session=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
+            document.cookie = 'session=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/manager;';
             window.location.href = '/manager/login';
         }
     );

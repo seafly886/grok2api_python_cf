@@ -13,16 +13,37 @@ class TestTokenManager {
       "grok-4": { RequestFrequency: 20 },
       "grok-4-reasoning": { RequestFrequency: 8 }
     };
-    
+
     this.pools = {};
     this.status = {};
+  }
+
+  extractSSO(token) {
+    try {
+      // Handle JWT tokens (like session tokens)
+      if (token.startsWith('eyJ')) {
+        // For JWT tokens, use the token itself as identifier (first 20 chars)
+        return token.substring(0, 20);
+      }
+
+      // Handle regular cookie format tokens
+      if (token.includes('sso=')) {
+        return token.split('sso=')[1].split(';')[0];
+      }
+
+      // Fallback: use first 20 characters as identifier
+      return token.substring(0, 20);
+    } catch (error) {
+      console.error('Failed to extract SSO:', error);
+      return 'unknown';
+    }
   }
 
   async addToken(tokenData) {
     const { type, token } = tokenData;
     const modelConfig = this.modelSuperConfig; // 简化测试，只用 super config
-    
-    const sso = token.split('sso=')[1].split(';')[0];
+
+    const sso = this.extractSSO(token);
     
     // 检查 token 是否已经存在于任何模型中
     let tokenExists = false;
@@ -102,7 +123,7 @@ class TestTokenManager {
     for (const [model, tokens] of Object.entries(this.pools)) {
       stats.modelStats[model] = {
         tokenCount: tokens.length,
-        tokens: tokens.map(t => t.token.split('sso=')[1].split(';')[0])
+        tokens: tokens.map(t => this.extractSSO(t.token))
       };
       stats.totalTokens += tokens.length;
       
