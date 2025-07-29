@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 # KV 存储绑定
 [[kv_namespaces]]
-binding = "KV"
+binding = "KV_STORE"
 id = "524997f3f89f472ebd3c1b0cc31a0d99"
 preview_id = "524997f3f89f472ebd3c1b0cc31a0d99"
 
