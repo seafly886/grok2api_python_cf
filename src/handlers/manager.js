@@ -78,22 +78,23 @@ export class ManagerHandler {
     try {
       const { password } = await request.json();
       const adminPassword = this.config.adminPassword;
-      
-      if (password === adminPassword) {
-        const sessionToken = crypto.randomUUID();
+      //暂时去掉登录
+      return new Response(JSON.stringify({ success: true });
+      // if (password === adminPassword) {
+      //   const sessionToken = crypto.randomUUID();
         
-        return new Response(JSON.stringify({ success: true }), {
-          headers: {
-            'Content-Type': 'application/json',
-            'Set-Cookie': `session=${sessionToken}; HttpOnly; Secure; SameSite=Strict; Max-Age=86400`
-          }
-        });
-      } else {
-        return new Response(JSON.stringify({ error: 'Invalid password' }), {
-          status: 401,
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
+      //   return new Response(JSON.stringify({ success: true }), {
+      //     headers: {
+      //       'Content-Type': 'application/json',
+      //       'Set-Cookie': `session=${sessionToken}; HttpOnly; Secure; SameSite=Strict; Max-Age=86400`
+      //     }
+      //   });
+      // } else {
+      //   return new Response(JSON.stringify({ error: 'Invalid password' }), {
+      //     status: 401,
+      //     headers: { 'Content-Type': 'application/json' }
+      //   });
+      // }
     } catch (error) {
       this.logger.error('Login error:', error);
       return new Response(JSON.stringify({ error: 'Login failed' }), {
