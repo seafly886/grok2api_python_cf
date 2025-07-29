@@ -126,29 +126,40 @@ export class TokenManager {
     try {
       const { type, token } = tokenData;
       const modelConfig = type === 'super' ? this.modelSuperConfig : this.modelNormalConfig;
-      
+
       const sso = token.split('sso=')[1].split(';')[0];
       const pools = await this.getTokenPools();
       const status = await this.getTokenStatus();
-      
+
+      // 检查 token 是否已经存在于任何模型中
+      let tokenExists = false;
+      for (const model of Object.keys(modelConfig)) {
+        if (pools[model] && pools[model].find(entry => entry.token === token)) {
+          tokenExists = true;
+          break;
+        }
+      }
+
+      if (tokenExists) {
+        this.logger.info(`Token already exists: ${sso}`);
+        return false; // 返回 false 表示 token 已存在
+      }
+
       // Initialize pools and status for all models
       for (const model of Object.keys(modelConfig)) {
         if (!pools[model]) pools[model] = [];
         if (!status[sso]) status[sso] = {};
-        
-        // Check if token already exists
-        const existingToken = pools[model].find(entry => entry.token === token);
-        if (!existingToken) {
-          pools[model].push({
-            token,
-            MaxRequestCount: modelConfig[model].RequestFrequency,
-            RequestCount: 0,
-            AddedTime: Date.now(),
-            StartCallTime: null,
-            type
-          });
-        }
-        
+
+        // 为每个模型添加 token（但每个 token 只添加一次）
+        pools[model].push({
+          token,
+          MaxRequestCount: modelConfig[model].RequestFrequency,
+          RequestCount: 0,
+          AddedTime: Date.now(),
+          StartCallTime: null,
+          type
+        });
+
         if (!status[sso][model]) {
           status[sso][model] = {
             isValid: true,
@@ -158,10 +169,10 @@ export class TokenManager {
           };
         }
       }
-      
+
       await this.saveTokenPools(pools);
       await this.saveTokenStatus(status);
-      
+
       this.logger.info(`Token added successfully: ${sso}`);
       return true;
     } catch (error) {
@@ -328,17 +339,56 @@ export class TokenManager {
     try {
       const pools = await this.getTokenPools();
       const allTokens = new Set();
-      
+
       for (const modelTokens of Object.values(pools)) {
         for (const entry of modelTokens) {
           allTokens.add(entry.token);
         }
       }
-      
+
       return Array.from(allTokens);
     } catch (error) {
       this.logger.error('Failed to get all tokens:', error);
       return [];
+    }
+  }
+
+  /**
+   * 清理重复的 token
+   */
+  async cleanupDuplicateTokens() {
+    try {
+      const pools = await this.getTokenPools();
+      let cleaned = false;
+
+      for (const model of Object.keys(pools)) {
+        if (!pools[model]) continue;
+
+        const uniqueTokens = new Map();
+        const cleanedTokens = [];
+
+        for (const entry of pools[model]) {
+          if (!uniqueTokens.has(entry.token)) {
+            uniqueTokens.set(entry.token, true);
+            cleanedTokens.push(entry);
+          } else {
+            this.logger.info(`Removing duplicate token for model ${model}: ${entry.token.substring(0, 20)}...`);
+            cleaned = true;
+          }
+        }
+
+        pools[model] = cleanedTokens;
+      }
+
+      if (cleaned) {
+        await this.saveTokenPools(pools);
+        this.logger.info('Duplicate tokens cleaned up successfully');
+      }
+
+      return cleaned;
+    } catch (error) {
+      this.logger.error('Failed to cleanup duplicate tokens:', error);
+      return false;
     }
   }
 }

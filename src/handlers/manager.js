@@ -43,6 +43,8 @@ export class ManagerHandler {
       return await this.setKeyMode(request);
     } else if (path === '/manager/api/status') {
       return await this.getStatus();
+    } else if (path === '/manager/api/cleanup' && method === 'POST') {
+      return await this.cleanupDuplicateTokens();
     } else {
       return new Response('Not Found', { status: 404 });
     }
@@ -193,21 +195,25 @@ export class ManagerHandler {
   async addToken(request) {
     try {
       const tokenData = await request.json();
+      this.logger.info('Adding token:', { type: tokenData.type, tokenLength: tokenData.token?.length });
+
       const success = await this.tokenManager.addToken(tokenData);
-      
+
       if (success) {
+        this.logger.info('Token added successfully');
         return new Response(JSON.stringify({ success: true }), {
           headers: { 'Content-Type': 'application/json' }
         });
       } else {
-        return new Response(JSON.stringify({ error: 'Failed to add token' }), {
-          status: 500,
+        this.logger.info('Token already exists or failed to add');
+        return new Response(JSON.stringify({ error: 'Token already exists or failed to add' }), {
+          status: 400,
           headers: { 'Content-Type': 'application/json' }
         });
       }
     } catch (error) {
       this.logger.error('Add token error:', error);
-      return new Response(JSON.stringify({ error: 'Failed to add token' }), {
+      return new Response(JSON.stringify({ error: 'Failed to add token: ' + error.message }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' }
       });
@@ -316,6 +322,27 @@ export class ManagerHandler {
     } catch (error) {
       this.logger.error('Get status error:', error);
       return new Response(JSON.stringify({ error: 'Failed to get status' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  }
+
+  async cleanupDuplicateTokens() {
+    try {
+      this.logger.info('Starting duplicate token cleanup');
+      const cleaned = await this.tokenManager.cleanupDuplicateTokens();
+
+      return new Response(JSON.stringify({
+        success: true,
+        cleaned: cleaned,
+        message: cleaned ? 'Duplicate tokens cleaned up successfully' : 'No duplicate tokens found'
+      }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (error) {
+      this.logger.error('Cleanup duplicate tokens error:', error);
+      return new Response(JSON.stringify({ error: 'Failed to cleanup duplicate tokens' }), {
         status: 500,
         headers: { 'Content-Type': 'application/json' }
       });
