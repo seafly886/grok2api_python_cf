@@ -50,8 +50,9 @@ export class ManagerHandler {
 
   async checkAuth() {
     try {
-      // 简化认证 - 跳过 token 验证，直接返回 true
-      this.logger.info('Auth check bypassed - always authenticated');
+      // 去掉 token 验证，但保留认证检查接口
+      // 在这种模式下，所有 API 请求都被允许（因为我们不使用 session token）
+      this.logger.info('Auth check - token validation disabled, allowing access');
       return true;
     } catch (error) {
       this.logger.error('Auth check error:', error);
@@ -128,20 +129,28 @@ export class ManagerHandler {
       this.logger.info('Password type:', typeof password);
       this.logger.info('Admin password type:', typeof adminPassword);
 
-      // 临时去掉密码验证 - 任何非空密码都可以登录
+      // 恢复密码验证逻辑
       const passwordStr = String(password || '').trim();
       const adminPasswordStr = String(adminPassword || '').trim();
+      const isMatch = passwordStr === adminPasswordStr;
 
-      this.logger.info('Password validation bypassed - any password accepted');
+      this.logger.info('Password validation enabled');
       this.logger.info('Trimmed password length:', passwordStr.length);
       this.logger.info('Configured admin password length:', adminPasswordStr.length);
+      this.logger.info('Password match:', isMatch);
 
-      if (passwordStr.length > 0) { // 只要密码不为空就允许登录
-        this.logger.info('Login successful - no session token needed');
+      if (isMatch && passwordStr.length > 0) { // 密码必须匹配且不为空
+        const sessionToken = crypto.randomUUID();
+        this.logger.info('Login successful, session token generated (but not used for auth):', sessionToken.substring(0, 8) + '...');
+
+        // 设置 session cookie（虽然不用于验证，但保持兼容性）
+        const isHttps = request.url.startsWith('https://');
+        const cookieFlags = isHttps ? 'HttpOnly; Secure; SameSite=Strict' : 'HttpOnly; SameSite=Strict';
 
         return new Response(JSON.stringify({ success: true }), {
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'Set-Cookie': `session=${sessionToken}; ${cookieFlags}; Max-Age=86400; Path=/`
           }
         });
       } else {
