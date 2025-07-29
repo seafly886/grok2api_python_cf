@@ -6,8 +6,8 @@ compatibility_flags = ["nodejs_compat"]
 # KV 存储绑定
 [[kv_namespaces]]
 binding = "KV_STORE"
-id = "your-kv-namespace-id"
-preview_id = "your-preview-kv-namespace-id"
+id = "524997f3f89f472ebd3c1b0cc31a0d99"
+preview_id = "524997f3f89f472ebd3c1b0cc31a0d99"
 
 # 环境变量 (非敏感)
 [vars]
