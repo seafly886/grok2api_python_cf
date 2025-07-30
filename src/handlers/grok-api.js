@@ -24,6 +24,8 @@ export class GrokApiHandler {
       return await this.handleModels();
     } else if (path === '/v1/test') {
       return await this.handleTest();
+    } else if (path === '/v1/debug/tokens') {
+      return await this.handleDebugTokens();
     } else {
       return new Response('Not Found', { status: 404 });
     }
@@ -46,6 +48,56 @@ export class GrokApiHandler {
     return new Response(JSON.stringify(testResponse, null, 2), {
       headers: { 'Content-Type': 'application/json' }
     });
+  }
+
+  async handleDebugTokens() {
+    try {
+      const pools = await this.tokenManager.getTokenPools();
+      const status = await this.tokenManager.getTokenStatus();
+
+      const debugInfo = {
+        message: 'Token Debug Information',
+        timestamp: new Date().toISOString(),
+        tokenPools: {},
+        tokenStatus: status,
+        summary: {
+          totalModels: Object.keys(pools).length,
+          modelsWithTokens: 0,
+          totalTokens: 0
+        }
+      };
+
+      // 处理每个模型的 token 信息
+      for (const [model, tokens] of Object.entries(pools)) {
+        if (tokens && tokens.length > 0) {
+          debugInfo.summary.modelsWithTokens++;
+          debugInfo.summary.totalTokens += tokens.length;
+
+          debugInfo.tokenPools[model] = tokens.map(token => ({
+            tokenPreview: token.token.substring(0, 50) + '...',
+            tokenLength: token.token.length,
+            maxRequestCount: token.MaxRequestCount,
+            currentRequestCount: token.RequestCount,
+            addedTime: new Date(token.AddedTime).toISOString(),
+            type: token.type
+          }));
+        } else {
+          debugInfo.tokenPools[model] = [];
+        }
+      }
+
+      return new Response(JSON.stringify(debugInfo, null, 2), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (error) {
+      return new Response(JSON.stringify({
+        error: 'Failed to get token debug info',
+        message: error.message
+      }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
   }
 
   async handleModels() {
@@ -86,50 +138,84 @@ export class GrokApiHandler {
         }), { status: 400, headers: { 'Content-Type': 'application/json' } });
       }
 
-      // Get token for this model
-      this.logger.info('Getting token for model:', model);
-      const token = await this.tokenManager.getNextTokenForModel(model);
+      // Try to get a valid token with retry logic
+      let token = null;
+      let retryCount = 0;
+      const maxRetries = 3;
 
-      console.log('=== Token Check ===');
-      console.log('Model:', model);
-      console.log('Token found:', !!token);
-      console.log('Token length:', token ? token.length : 0);
-      console.log('Token preview:', token ? token.substring(0, 100) + '...' : 'N/A');
+      while (retryCount < maxRetries) {
+        // Get token for this model
+        this.logger.info('Getting token for model:', model);
+        token = await this.tokenManager.getNextTokenForModel(model);
 
-      if (!token) {
-        console.error('❌ No available tokens for model:', model);
-        this.logger.error('No available tokens for model:', model);
-        return new Response(JSON.stringify({
-          error: { message: 'No available tokens for this model', type: 'insufficient_quota' }
-        }), { status: 429, headers: { 'Content-Type': 'application/json' } });
-      }
+        console.log('=== Token Check ===');
+        console.log('Model:', model);
+        console.log('Token found:', !!token);
+        console.log('Token length:', token ? token.length : 0);
+        console.log('Token preview:', token ? token.substring(0, 100) + '...' : 'N/A');
 
-      this.logger.info('Token obtained, preparing Grok request');
+        if (!token) {
+          console.error('❌ No available tokens for model:', model);
+          this.logger.error('No available tokens for model:', model);
+          return new Response(JSON.stringify({
+            error: { message: 'No available tokens for this model', type: 'insufficient_quota' }
+          }), { status: 429, headers: { 'Content-Type': 'application/json' } });
+        }
 
-      // Prepare Grok request
-      const grokRequest = await this.prepareGrokRequest(body, token);
+        try {
+          this.logger.info('Token obtained, preparing Grok request');
 
-      this.logger.info('Grok request prepared:', {
-        modelName: grokRequest.modelName,
-        messageLength: grokRequest.message?.length || 0,
-        temporary: grokRequest.temporary
-      });
+          // Prepare Grok request
+          const grokRequest = await this.prepareGrokRequest(body, token);
 
-      // Make request to Grok
-      const response = await this.makeGrokRequest(grokRequest, token);
+          this.logger.info('Grok request prepared:', {
+            modelName: grokRequest.modelName,
+            messageLength: grokRequest.message?.length || 0,
+            temporary: grokRequest.temporary
+          });
 
-      this.logger.info('Grok response received, processing...');
+          // Make request to Grok
+          const response = await this.makeGrokRequest(grokRequest, token);
 
-      if (stream) {
-        this.logger.info('Handling as stream response');
-        return this.handleStreamResponse(response, model);
-      } else {
-        this.logger.info('Handling as non-stream response');
-        return this.handleNonStreamResponse(response, model);
+          this.logger.info('Grok response received, processing...');
+
+          if (stream) {
+            this.logger.info('Handling as stream response');
+            return this.handleStreamResponse(response, model);
+          } else {
+            this.logger.info('Handling as non-stream response');
+            return this.handleNonStreamResponse(response, model);
+          }
+        } catch (error) {
+          // 如果是token无效错误，标记token为无效并重试
+          if (error.message.includes('token may be invalid or expired')) {
+            this.logger.warn(`Token invalid, marking as invalid and retrying... (attempt ${retryCount + 1}/${maxRetries})`);
+            await this.tokenManager.markTokenAsInvalid(token);
+            retryCount++;
+            if (retryCount >= maxRetries) {
+              throw error; // 如果达到最大重试次数，抛出错误
+            }
+            // 继续循环尝试下一个token
+          } else {
+            // 如果不是token无效错误，直接抛出
+            throw error;
+          }
+        }
       }
     } catch (error) {
       this.logger.error('Chat completions error:', error);
       this.logger.error('Error stack:', error.stack);
+      
+      // 如果错误是由于token无效导致的，返回更友好的错误信息
+      if (error.message.includes('token may be invalid or expired')) {
+        return new Response(JSON.stringify({
+          error: {
+            message: 'API token is invalid or expired. Please check your API token and try again.',
+            type: 'authentication_error'
+          }
+        }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+      }
+      
       return new Response(JSON.stringify({
         error: { message: error.message, type: 'internal_error' }
       }), { status: 500, headers: { 'Content-Type': 'application/json' } });
@@ -266,7 +352,11 @@ export class GrokApiHandler {
         console.error('❌ Received HTML response instead of JSON - likely redirected to login page');
         const htmlContent = await response.text();
         console.log('HTML content (first 500 chars):', htmlContent.substring(0, 500));
-        throw new Error('Received HTML response instead of JSON - token may be invalid or expired');
+        
+        // 标记token为无效
+        await this.tokenManager.markTokenAsInvalid(token);
+        
+        throw new Error('Received HTML response instead of JSON - API token may be invalid or expired. Please check your API token and try again.');
       }
 
       if (!response.ok) {
@@ -303,6 +393,12 @@ export class GrokApiHandler {
 
         const chunk = decoder.decode(value, { stream: true });
         buffer += chunk;
+
+        // 检查是否是HTML响应
+        if (buffer.toLowerCase().includes('<html') || buffer.toLowerCase().includes('<!doctype')) {
+          this.logger.error('❌ Received HTML response in non-stream mode');
+          throw new Error('Received HTML response instead of JSON - API token may be invalid or expired. Please check your API token and try again.');
+        }
 
         // 处理缓冲区中的完整行
         const lines = buffer.split('\n');
@@ -438,6 +534,12 @@ export class GrokApiHandler {
 
             const chunk = decoder.decode(value, { stream: true });
             buffer += chunk;
+
+            // 检查是否是HTML响应
+            if (buffer.toLowerCase().includes('<html') || buffer.toLowerCase().includes('<!doctype')) {
+              self.logger.error('❌ Received HTML response in stream mode');
+              throw new Error('Received HTML response instead of JSON - API token may be invalid or expired. Please check your API token and try again.');
+            }
 
             // 记录原始响应数据
             console.log('Raw Grok chunk:', chunk.substring(0, 500) + (chunk.length > 500 ? '...' : ''));
@@ -646,6 +748,21 @@ export class GrokApiHandler {
           result.token = data;
         } else if (data.choices && data.choices[0]) {
           result.token = data.choices[0].delta?.content || data.choices[0].message?.content;
+        } else if (typeof data === 'object' && data !== null) {
+          // 尝试将整个对象转换为字符串
+          result.token = JSON.stringify(data);
+        }
+      }
+
+      // 清理token内容，移除可能的HTML标签
+      if (result.token && typeof result.token === 'string') {
+        // 移除可能的HTML标签
+        result.token = result.token.replace(/<[^>]*>/g, '');
+        
+        // 如果token看起来像HTML（包含常见的HTML标签），则返回空
+        if (/<(html|head|body|div|span|p)[^>]*>/i.test(result.token)) {
+          this.logger.warn('Response appears to be HTML, treating as invalid');
+          result.token = null;
         }
       }
 

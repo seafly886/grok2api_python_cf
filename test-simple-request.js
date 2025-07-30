@@ -2,8 +2,8 @@
  * 简单的 API 测试请求
  */
 
-const API_BASE = 'https://grok-api-workers.18571569668.workers.dev';
-const API_KEY = '123456';
+const API_BASE = 'https://dwuxflxd.ap-northeast-1.clawcloudrun.com';
+const API_KEY = 'sk-0epa5Jxb0igRwtEgED9zQtUJemktSRoy2DOdRYIbVFzUysOs';
 
 async function testSimpleRequest() {
   console.log('🧪 测试简单的聊天请求');

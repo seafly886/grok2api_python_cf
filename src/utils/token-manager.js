@@ -694,4 +694,31 @@ export class TokenManager {
       return false;
     }
   }
+  
+  /**
+   * Mark a token as invalid
+   */
+  async markTokenAsInvalid(token) {
+    try {
+      const sso = this.extractSSO(token);
+      const status = await this.getTokenStatus();
+      
+      // Mark all models for this token as invalid
+      if (status[sso]) {
+        for (const model in status[sso]) {
+          status[sso][model].isValid = false;
+          status[sso][model].invalidatedTime = Date.now();
+        }
+        await this.saveTokenStatus(status);
+        this.logger.info(`Token marked as invalid: ${sso}`);
+        return true;
+      }
+      
+      this.logger.info(`Token not found in status: ${sso}`);
+      return false;
+    } catch (error) {
+      this.logger.error('Failed to mark token as invalid:', error);
+      return false;
+    }
+  }
 }

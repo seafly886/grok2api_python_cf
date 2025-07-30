@@ -2,8 +2,8 @@
  * 测试聊天 API 的流式和非流式响应
  */
 
-const API_BASE = 'https://grok-api-workers.18571569668.workers.dev';
-const API_KEY = '123456'; // 从配置中获取
+const API_BASE = 'https://dwuxflxd.ap-northeast-1.clawcloudrun.com';
+const API_KEY = 'sk-0epa5Jxb0igRwtEgED9zQtUJemktSRoy2DOdRYIbVFzUysOs'; // 从配置中获取
 
 // 测试用例
 const testCases = [
