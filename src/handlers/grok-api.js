@@ -189,7 +189,7 @@ export class GrokApiHandler {
         } catch (error) {
           // 如果是token无效错误，标记token为无效并重试
           if (error.message.includes('token may be invalid or expired')) {
-            this.logger.warn(`Token invalid, marking as invalid and retrying... (attempt ${retryCount + 1}/${maxRetries})`);
+            this.logger.warning(`Token invalid, marking as invalid and retrying... (attempt ${retryCount + 1}/${maxRetries})`);
             await this.tokenManager.markTokenAsInvalid(token);
             retryCount++;
             if (retryCount >= maxRetries) {
@@ -704,7 +704,7 @@ export class GrokApiHandler {
     let response = data.result?.response || data.response || data;
 
     if (!response) {
-      this.logger.warn('No response found in data:', data);
+      this.logger.warning('No response found in data:', data);
       return result;
     }
 
@@ -761,7 +761,7 @@ export class GrokApiHandler {
         
         // 如果token看起来像HTML（包含常见的HTML标签），则返回空
         if (/<(html|head|body|div|span|p)[^>]*>/i.test(result.token)) {
-          this.logger.warn('Response appears to be HTML, treating as invalid');
+          this.logger.warning('Response appears to be HTML, treating as invalid');
           result.token = null;
         }
       }
@@ -778,7 +778,7 @@ export class GrokApiHandler {
         hasImageUrl: !!result.imageUrl
       });
     } else {
-      this.logger.warn('No content extracted from response');
+      this.logger.warning('No content extracted from response');
     }
 
     return result;

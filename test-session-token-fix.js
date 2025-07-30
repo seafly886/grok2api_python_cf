@@ -23,12 +23,12 @@ class TestTokenManager {
             const payload = JSON.parse(atob(parts[1]));
             // If it has session_id, it's a session token, not SSO token
             if (payload.session_id) {
-              this.logger.warn('Rejected session token:', token.substring(0, 20));
+              this.logger.warning('Rejected session token:', token.substring(0, 20));
               return false;
             }
           } catch (e) {
             // If we can't decode, treat as invalid
-            this.logger.warn('Invalid JWT token format:', token.substring(0, 20));
+            this.logger.warning('Invalid JWT token format:', token.substring(0, 20));
             return false;
           }
         }
@@ -40,7 +40,7 @@ class TestTokenManager {
       }
       
       // Reject other formats for now
-      this.logger.warn('Unsupported token format:', token.substring(0, 20));
+      this.logger.warning('Unsupported token format:', token.substring(0, 20));
       return false;
     } catch (error) {
       this.logger.error('Token validation error:', error);

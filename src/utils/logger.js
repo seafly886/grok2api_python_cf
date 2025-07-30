@@ -65,4 +65,9 @@ export class Logger {
       console.error(this._formatMessage('ERROR', ...processedArgs));
     }
   }
+  
+  // 为了兼容性添加warn方法，指向warning方法
+  warn(...args) {
+    return this.warning(...args);
+  }
 }
