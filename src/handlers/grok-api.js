@@ -66,59 +66,96 @@ export class GrokApiHandler {
 
   async handleChatCompletions(request) {
     try {
+      this.logger.info('=== Chat Completions Request Started ===');
+
       const body = await request.json();
       const { model, messages, stream = false } = body;
 
+      this.logger.info('Request details:', {
+        model,
+        messagesCount: messages?.length || 0,
+        stream,
+        firstMessage: messages?.[0]?.content?.substring(0, 100) || 'N/A'
+      });
+
       // Validate model
       if (!this.modelMapping[model]) {
+        this.logger.error('Unsupported model:', model);
         return new Response(JSON.stringify({
           error: { message: `Model ${model} not supported`, type: 'invalid_request_error' }
         }), { status: 400, headers: { 'Content-Type': 'application/json' } });
       }
 
       // Get token for this model
+      this.logger.info('Getting token for model:', model);
       const token = await this.tokenManager.getNextTokenForModel(model);
       if (!token) {
+        this.logger.error('No available tokens for model:', model);
         return new Response(JSON.stringify({
           error: { message: 'No available tokens for this model', type: 'insufficient_quota' }
         }), { status: 429, headers: { 'Content-Type': 'application/json' } });
       }
 
+      this.logger.info('Token obtained, preparing Grok request');
+
       // Prepare Grok request
       const grokRequest = await this.prepareGrokRequest(body, token);
-      
+
+      this.logger.info('Grok request prepared:', {
+        modelName: grokRequest.modelName,
+        messageLength: grokRequest.message?.length || 0,
+        temporary: grokRequest.temporary
+      });
+
       // Make request to Grok
       const response = await this.makeGrokRequest(grokRequest, token);
-      
+
+      this.logger.info('Grok response received, processing...');
+
       if (stream) {
+        this.logger.info('Handling as stream response');
         return this.handleStreamResponse(response, model);
       } else {
+        this.logger.info('Handling as non-stream response');
         return this.handleNonStreamResponse(response, model);
       }
     } catch (error) {
       this.logger.error('Chat completions error:', error);
+      this.logger.error('Error stack:', error.stack);
       return new Response(JSON.stringify({
         error: { message: error.message, type: 'internal_error' }
       }), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
   }
 
-  async prepareGrokRequest(request, token) {
+  async prepareGrokRequest(request) {
     const { model, messages } = request;
     const normalizedModel = this.modelMapping[model];
-    
+
+    this.logger.info('Preparing Grok request:', {
+      originalModel: model,
+      normalizedModel,
+      messagesCount: messages?.length || 0
+    });
+
     // Process messages
     let processedMessages = '';
     let lastRole = null;
     let lastContent = '';
-    
+
     for (const message of messages) {
       const role = message.role === 'assistant' ? 'assistant' : 'user';
       const content = this.processMessageContent(message.content);
-      
+
+      this.logger.info(`Processing message:`, {
+        role: message.role,
+        normalizedRole: role,
+        contentLength: content?.length || 0
+      });
+
       if (role === lastRole && content) {
         lastContent += '\n' + content;
-        processedMessages = processedMessages.substring(0, processedMessages.lastIndexOf(`${role.toUpperCase()}: `)) + 
+        processedMessages = processedMessages.substring(0, processedMessages.lastIndexOf(`${role.toUpperCase()}: `)) +
                            `${role.toUpperCase()}: ${lastContent}\n`;
       } else {
         processedMessages += `${role.toUpperCase()}: ${content || '[图片]'}\n`;
@@ -257,30 +294,53 @@ export class GrokApiHandler {
         for (const line of lines) {
           if (!line.trim()) continue;
 
+          this.logger.info('Non-stream processing line:', line.substring(0, 200) + (line.length > 200 ? '...' : ''));
+
           try {
             // 尝试解析 JSON
             let data;
             if (line.startsWith('data: ')) {
               // 处理 SSE 格式
               const jsonStr = line.substring(6);
-              if (jsonStr === '[DONE]') continue;
+              if (jsonStr === '[DONE]') {
+                this.logger.info('Non-stream received [DONE] marker');
+                continue;
+              }
+              this.logger.info('Non-stream parsing SSE data:', jsonStr.substring(0, 100) + '...');
               data = JSON.parse(jsonStr);
-            } else {
+            } else if (line.startsWith('{') || line.startsWith('[')) {
               // 直接 JSON 格式
+              this.logger.info('Non-stream parsing direct JSON:', line.substring(0, 100) + '...');
               data = JSON.parse(line);
+            } else {
+              // 可能是纯文本响应
+              this.logger.info('Non-stream treating as plain text:', line.substring(0, 100) + '...');
+              data = { result: { response: { token: line } } };
             }
 
-            this.logger.info('Processing Grok data:', { hasResult: !!data.result, hasError: !!data.error });
+            this.logger.info('Non-stream parsed data structure:', {
+              hasResult: !!data.result,
+              hasError: !!data.error,
+              hasResponse: !!data.result?.response,
+              hasToken: !!data.result?.response?.token,
+              dataKeys: Object.keys(data || {})
+            });
 
             const result = this.processGrokResponse(data, model);
             if (result.token) {
+              this.logger.info('Non-stream extracted token:', result.token.substring(0, 50) + '...');
               fullResponse += result.token;
             }
             if (result.imageUrl) {
+              this.logger.info('Non-stream processing image URL:', result.imageUrl);
               fullResponse += await this.handleImageResponse(result.imageUrl);
             }
           } catch (e) {
-            this.logger.error('Error parsing line in non-stream:', { line: line.substring(0, 100), error: e.message });
+            this.logger.error('Error parsing line in non-stream:', {
+              line: line.substring(0, 200),
+              error: e.message,
+              stack: e.stack
+            });
             // 继续处理其他行
           }
         }
@@ -357,24 +417,42 @@ export class GrokApiHandler {
             for (const line of lines) {
               if (!line.trim()) continue;
 
+              self.logger.info('Processing line:', line.substring(0, 200) + (line.length > 200 ? '...' : ''));
+
               try {
                 // 尝试解析 JSON
                 let data;
                 if (line.startsWith('data: ')) {
                   // 处理 SSE 格式
                   const jsonStr = line.substring(6);
-                  if (jsonStr === '[DONE]') continue;
+                  if (jsonStr === '[DONE]') {
+                    self.logger.info('Received [DONE] marker');
+                    continue;
+                  }
+                  self.logger.info('Parsing SSE data:', jsonStr.substring(0, 100) + '...');
                   data = JSON.parse(jsonStr);
-                } else {
+                } else if (line.startsWith('{') || line.startsWith('[')) {
                   // 直接 JSON 格式
+                  self.logger.info('Parsing direct JSON:', line.substring(0, 100) + '...');
                   data = JSON.parse(line);
+                } else {
+                  // 可能是纯文本响应
+                  self.logger.info('Treating as plain text:', line.substring(0, 100) + '...');
+                  data = { result: { response: { token: line } } };
                 }
 
-                self.logger.info('Received Grok data:', { hasResult: !!data.result, hasError: !!data.error });
+                self.logger.info('Parsed data structure:', {
+                  hasResult: !!data.result,
+                  hasError: !!data.error,
+                  hasResponse: !!data.result?.response,
+                  hasToken: !!data.result?.response?.token,
+                  dataKeys: Object.keys(data || {})
+                });
 
                 const result = self.processGrokResponse(data, model);
 
                 if (result.token) {
+                  self.logger.info('Extracted token:', result.token.substring(0, 50) + '...');
                   const sseData = {
                     id: `chatcmpl-${crypto.randomUUID()}`,
                     object: 'chat.completion.chunk',
@@ -390,6 +468,7 @@ export class GrokApiHandler {
                 }
 
                 if (result.imageUrl) {
+                  self.logger.info('Processing image URL:', result.imageUrl);
                   const imageContent = await self.handleImageResponse(result.imageUrl);
                   const sseData = {
                     id: `chatcmpl-${crypto.randomUUID()}`,
@@ -405,7 +484,11 @@ export class GrokApiHandler {
                   controller.enqueue(encoder.encode(`data: ${JSON.stringify(sseData)}\n\n`));
                 }
               } catch (e) {
-                self.logger.error('Error parsing line:', { line: line.substring(0, 100), error: e.message });
+                self.logger.error('Error parsing line:', {
+                  line: line.substring(0, 200),
+                  error: e.message,
+                  stack: e.stack
+                });
                 // 继续处理其他行
               }
             }

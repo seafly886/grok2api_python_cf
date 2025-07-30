@@ -16,37 +16,53 @@ export class Logger {
     return this.levels[level] >= this.levels[this.level];
   }
 
-  _formatMessage(level, message, source = 'Worker') {
+  _formatMessage(level, ...args) {
     const timestamp = new Date().toISOString();
-    return `${timestamp} | ${level.padEnd(8)} | [${source}] ${message}`;
-  }
+    const source = 'GrokAPI';
 
-  debug(message, source = 'Worker') {
-    if (this._shouldLog('DEBUG')) {
-      console.log(this._formatMessage('DEBUG', message, source));
-    }
-  }
-
-  info(message, source = 'Worker') {
-    if (this._shouldLog('INFO')) {
-      console.log(this._formatMessage('INFO', message, source));
-    }
-  }
-
-  warning(message, source = 'Worker') {
-    if (this._shouldLog('WARNING')) {
-      console.warn(this._formatMessage('WARNING', message, source));
-    }
-  }
-
-  error(message, source = 'Worker') {
-    if (this._shouldLog('ERROR')) {
-      if (message instanceof Error) {
-        console.error(this._formatMessage('ERROR', message.message, source));
-        console.error(message.stack);
-      } else {
-        console.error(this._formatMessage('ERROR', message, source));
+    // 处理多个参数，将对象序列化为 JSON
+    const formattedArgs = args.map(arg => {
+      if (typeof arg === 'object' && arg !== null) {
+        try {
+          return JSON.stringify(arg, null, 2);
+        } catch (e) {
+          return '[Object]';
+        }
       }
+      return String(arg);
+    }).join(' ');
+
+    return `${timestamp} | ${level.padEnd(8)} | [${source}] ${formattedArgs}`;
+  }
+
+  debug(...args) {
+    if (this._shouldLog('DEBUG')) {
+      console.log(this._formatMessage('DEBUG', ...args));
+    }
+  }
+
+  info(...args) {
+    if (this._shouldLog('INFO')) {
+      console.log(this._formatMessage('INFO', ...args));
+    }
+  }
+
+  warning(...args) {
+    if (this._shouldLog('WARNING')) {
+      console.warn(this._formatMessage('WARNING', ...args));
+    }
+  }
+
+  error(...args) {
+    if (this._shouldLog('ERROR')) {
+      // 特殊处理 Error 对象
+      const processedArgs = args.map(arg => {
+        if (arg instanceof Error) {
+          return `${arg.message}\nStack: ${arg.stack}`;
+        }
+        return arg;
+      });
+      console.error(this._formatMessage('ERROR', ...processedArgs));
     }
   }
 }
