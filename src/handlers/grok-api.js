@@ -89,7 +89,15 @@ export class GrokApiHandler {
       // Get token for this model
       this.logger.info('Getting token for model:', model);
       const token = await this.tokenManager.getNextTokenForModel(model);
+
+      console.log('=== Token Check ===');
+      console.log('Model:', model);
+      console.log('Token found:', !!token);
+      console.log('Token length:', token ? token.length : 0);
+      console.log('Token preview:', token ? token.substring(0, 100) + '...' : 'N/A');
+
       if (!token) {
+        console.error('❌ No available tokens for model:', model);
         this.logger.error('No available tokens for model:', model);
         return new Response(JSON.stringify({
           error: { message: 'No available tokens for this model', type: 'insufficient_quota' }
@@ -233,12 +241,12 @@ export class GrokApiHandler {
       'Cookie': `${token};${this.config.cfClearance || ''}`
     };
 
-    this.logger.info('Making Grok request:', {
-      url: `${this.baseUrl}/api/chat`,
-      model: requestData.modelName,
-      messageLength: requestData.message?.length || 0,
-      hasToken: !!token
-    });
+    // 记录详细的请求信息
+    console.log('=== Making Grok Request ===');
+    console.log('URL:', `${this.baseUrl}/api/chat`);
+    console.log('Headers:', JSON.stringify(headers, null, 2));
+    console.log('Request Data:', JSON.stringify(requestData, null, 2));
+    console.log('Token (first 50 chars):', token.substring(0, 50) + '...');
 
     try {
       const response = await fetch(`${this.baseUrl}/api/chat`, {
@@ -247,26 +255,35 @@ export class GrokApiHandler {
         body: JSON.stringify(requestData)
       });
 
-      this.logger.info('Grok response received:', {
-        status: response.status,
-        statusText: response.statusText,
-        contentType: response.headers.get('content-type'),
-        hasBody: !!response.body
-      });
+      console.log('=== Grok Response Received ===');
+      console.log('Status:', response.status, response.statusText);
+      console.log('Content-Type:', response.headers.get('content-type'));
+      console.log('Response Headers:', Object.fromEntries(response.headers.entries()));
+
+      // 检查是否返回了 HTML（表示被重定向）
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('text/html')) {
+        console.error('❌ Received HTML response instead of JSON - likely redirected to login page');
+        const htmlContent = await response.text();
+        console.log('HTML content (first 500 chars):', htmlContent.substring(0, 500));
+        throw new Error('Received HTML response instead of JSON - token may be invalid or expired');
+      }
 
       if (!response.ok) {
         const errorText = await response.text();
-        this.logger.error('Grok API error response:', {
+        console.error('Grok API error response:', {
           status: response.status,
           statusText: response.statusText,
-          body: errorText
+          body: errorText.substring(0, 1000)
         });
         throw new Error(`Grok API error: ${response.status} ${response.statusText} - ${errorText}`);
       }
 
+      console.log('✅ Grok request successful');
       return response;
     } catch (error) {
-      this.logger.error('Grok request failed:', error);
+      console.error('❌ Grok request failed:', error.message);
+      console.error('Error stack:', error.stack);
       throw error;
     }
   }
@@ -336,12 +353,24 @@ export class GrokApiHandler {
               fullResponse += await this.handleImageResponse(result.imageUrl);
             }
           } catch (e) {
-            this.logger.error('Error parsing line in non-stream:', {
-              line: line.substring(0, 200),
-              error: e.message,
-              stack: e.stack
-            });
-            // 继续处理其他行
+            // 使用 console.error 直接输出，避免 Logger 序列化问题
+            console.error('Non-stream error parsing line:', line.substring(0, 200), 'Error:', e.message);
+
+            // 如果是 JSON 解析错误，尝试作为纯文本处理
+            if (e.name === 'SyntaxError' && line.trim()) {
+              try {
+                this.logger.info('Non-stream treating failed JSON as plain text token');
+                const textData = { result: { response: { token: line.trim() } } };
+                const result = this.processGrokResponse(textData, model);
+
+                if (result.token) {
+                  this.logger.info('Non-stream extracted text token:', result.token.substring(0, 50) + '...');
+                  fullResponse += result.token;
+                }
+              } catch (textError) {
+                console.error('Non-stream failed to process as text:', textError.message);
+              }
+            }
           }
         }
       }
@@ -409,6 +438,9 @@ export class GrokApiHandler {
 
             const chunk = decoder.decode(value, { stream: true });
             buffer += chunk;
+
+            // 记录原始响应数据
+            console.log('Raw Grok chunk:', chunk.substring(0, 500) + (chunk.length > 500 ? '...' : ''));
 
             // 处理缓冲区中的完整行
             const lines = buffer.split('\n');
@@ -484,12 +516,34 @@ export class GrokApiHandler {
                   controller.enqueue(encoder.encode(`data: ${JSON.stringify(sseData)}\n\n`));
                 }
               } catch (e) {
-                self.logger.error('Error parsing line:', {
-                  line: line.substring(0, 200),
-                  error: e.message,
-                  stack: e.stack
-                });
-                // 继续处理其他行
+                // 使用 console.error 直接输出，避免 Logger 序列化问题
+                console.error('Error parsing line:', line.substring(0, 200), 'Error:', e.message);
+
+                // 如果是 JSON 解析错误，尝试作为纯文本处理
+                if (e.name === 'SyntaxError' && line.trim()) {
+                  try {
+                    self.logger.info('Treating failed JSON as plain text token');
+                    const textData = { result: { response: { token: line.trim() } } };
+                    const result = self.processGrokResponse(textData, model);
+
+                    if (result.token) {
+                      const sseData = {
+                        id: `chatcmpl-${crypto.randomUUID()}`,
+                        object: 'chat.completion.chunk',
+                        created: Math.floor(Date.now() / 1000),
+                        model,
+                        choices: [{
+                          index: 0,
+                          delta: { content: result.token }
+                        }]
+                      };
+
+                      controller.enqueue(encoder.encode(`data: ${JSON.stringify(sseData)}\n\n`));
+                    }
+                  } catch (textError) {
+                    console.error('Failed to process as text:', textError.message);
+                  }
+                }
               }
             }
           }

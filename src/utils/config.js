@@ -93,7 +93,7 @@ export class Config {
       'Accept': '*/*',
       'Accept-Language': 'zh-CN,zh;q=0.9',
       'Accept-Encoding': 'gzip, deflate, br, zstd',
-      'Content-Type': 'text/plain;charset=UTF-8',
+      'Content-Type': 'application/json',
       'Connection': 'keep-alive',
       'Origin': 'https://grok.com',
       'Priority': 'u=1, i',
