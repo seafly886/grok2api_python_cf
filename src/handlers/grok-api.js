@@ -21,13 +21,34 @@ export class GrokApiHandler {
     if (path === '/v1/chat/completions') {
       return await this.handleChatCompletions(request);
     } else if (path === '/v1/models') {
-      return await this.handleModels(request);
+      return await this.handleModels();
+    } else if (path === '/v1/test') {
+      return await this.handleTest();
     } else {
       return new Response('Not Found', { status: 404 });
     }
   }
 
-  async handleModels(request) {
+  async handleTest() {
+    // 测试端点，用于调试
+    const testResponse = {
+      message: 'Grok API Handler Test',
+      timestamp: new Date().toISOString(),
+      config: {
+        baseUrl: this.baseUrl,
+        supportedModels: Object.keys(this.modelMapping),
+        isTempConversation: this.config.isTempConversation,
+        showThinking: this.config.showThinking,
+        showSearchResults: this.config.showSearchResults
+      }
+    };
+
+    return new Response(JSON.stringify(testResponse, null, 2), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  async handleModels() {
     const models = Object.keys(this.modelMapping).map(id => ({
       id,
       object: 'model',
@@ -175,17 +196,42 @@ export class GrokApiHandler {
       'Cookie': `${token};${this.config.cfClearance || ''}`
     };
 
-    const response = await fetch(`${this.baseUrl}/api/chat`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(requestData)
+    this.logger.info('Making Grok request:', {
+      url: `${this.baseUrl}/api/chat`,
+      model: requestData.modelName,
+      messageLength: requestData.message?.length || 0,
+      hasToken: !!token
     });
 
-    if (!response.ok) {
-      throw new Error(`Grok API error: ${response.status} ${response.statusText}`);
-    }
+    try {
+      const response = await fetch(`${this.baseUrl}/api/chat`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(requestData)
+      });
 
-    return response;
+      this.logger.info('Grok response received:', {
+        status: response.status,
+        statusText: response.statusText,
+        contentType: response.headers.get('content-type'),
+        hasBody: !!response.body
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        this.logger.error('Grok API error response:', {
+          status: response.status,
+          statusText: response.statusText,
+          body: errorText
+        });
+        throw new Error(`Grok API error: ${response.status} ${response.statusText} - ${errorText}`);
+      }
+
+      return response;
+    } catch (error) {
+      this.logger.error('Grok request failed:', error);
+      throw error;
+    }
   }
 
   async handleNonStreamResponse(response, model) {
@@ -193,19 +239,39 @@ export class GrokApiHandler {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let fullResponse = '';
-      
+      let buffer = '';
+
+      this.logger.info('Starting non-stream response processing');
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
-        
+
+        const chunk = decoder.decode(value, { stream: true });
+        buffer += chunk;
+
+        // 处理缓冲区中的完整行
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // 保留最后一个可能不完整的行
+
         for (const line of lines) {
           if (!line.trim()) continue;
-          
+
           try {
-            const data = JSON.parse(line);
+            // 尝试解析 JSON
+            let data;
+            if (line.startsWith('data: ')) {
+              // 处理 SSE 格式
+              const jsonStr = line.substring(6);
+              if (jsonStr === '[DONE]') continue;
+              data = JSON.parse(jsonStr);
+            } else {
+              // 直接 JSON 格式
+              data = JSON.parse(line);
+            }
+
+            this.logger.info('Processing Grok data:', { hasResult: !!data.result, hasError: !!data.error });
+
             const result = this.processGrokResponse(data, model);
             if (result.token) {
               fullResponse += result.token;
@@ -214,10 +280,13 @@ export class GrokApiHandler {
               fullResponse += await this.handleImageResponse(result.imageUrl);
             }
           } catch (e) {
-            // Skip invalid JSON lines
+            this.logger.error('Error parsing line in non-stream:', { line: line.substring(0, 100), error: e.message });
+            // 继续处理其他行
           }
         }
       }
+
+      this.logger.info('Non-stream response completed:', { responseLength: fullResponse.length });
 
       return new Response(JSON.stringify({
         id: `chatcmpl-${crypto.randomUUID()}`,
@@ -228,13 +297,21 @@ export class GrokApiHandler {
           index: 0,
           message: {
             role: 'assistant',
-            content: fullResponse
+            content: fullResponse || '抱歉，没有收到有效的响应内容。'
           },
           finish_reason: 'stop'
         }],
-        usage: null
+        usage: {
+          prompt_tokens: 0,
+          completion_tokens: fullResponse.length,
+          total_tokens: fullResponse.length
+        }
       }), {
-        headers: { 'Content-Type': 'application/json' }
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+        }
       });
     } catch (error) {
       this.logger.error('Non-stream response error:', error);
@@ -244,27 +321,59 @@ export class GrokApiHandler {
 
   async handleStreamResponse(response, model) {
     const encoder = new TextEncoder();
-    
+    const self = this; // 保存 this 上下文
+
     const stream = new ReadableStream({
       async start(controller) {
         try {
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
-          
+          let buffer = ''; // 添加缓冲区处理不完整的 JSON
+
+          // 发送初始的流式响应头
+          const initialData = {
+            id: `chatcmpl-${crypto.randomUUID()}`,
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model,
+            choices: [{
+              index: 0,
+              delta: { role: 'assistant' }
+            }]
+          };
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(initialData)}\n\n`));
+
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            
-            const chunk = decoder.decode(value);
-            const lines = chunk.split('\n');
-            
+
+            const chunk = decoder.decode(value, { stream: true });
+            buffer += chunk;
+
+            // 处理缓冲区中的完整行
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || ''; // 保留最后一个可能不完整的行
+
             for (const line of lines) {
               if (!line.trim()) continue;
-              
+
               try {
-                const data = JSON.parse(line);
-                const result = this.processGrokResponse(data, model);
-                
+                // 尝试解析 JSON
+                let data;
+                if (line.startsWith('data: ')) {
+                  // 处理 SSE 格式
+                  const jsonStr = line.substring(6);
+                  if (jsonStr === '[DONE]') continue;
+                  data = JSON.parse(jsonStr);
+                } else {
+                  // 直接 JSON 格式
+                  data = JSON.parse(line);
+                }
+
+                self.logger.info('Received Grok data:', { hasResult: !!data.result, hasError: !!data.error });
+
+                const result = self.processGrokResponse(data, model);
+
                 if (result.token) {
                   const sseData = {
                     id: `chatcmpl-${crypto.randomUUID()}`,
@@ -276,12 +385,12 @@ export class GrokApiHandler {
                       delta: { content: result.token }
                     }]
                   };
-                  
+
                   controller.enqueue(encoder.encode(`data: ${JSON.stringify(sseData)}\n\n`));
                 }
-                
+
                 if (result.imageUrl) {
-                  const imageContent = await this.handleImageResponse(result.imageUrl);
+                  const imageContent = await self.handleImageResponse(result.imageUrl);
                   const sseData = {
                     id: `chatcmpl-${crypto.randomUUID()}`,
                     object: 'chat.completion.chunk',
@@ -292,18 +401,33 @@ export class GrokApiHandler {
                       delta: { content: imageContent }
                     }]
                   };
-                  
+
                   controller.enqueue(encoder.encode(`data: ${JSON.stringify(sseData)}\n\n`));
                 }
               } catch (e) {
-                // Skip invalid JSON lines
+                self.logger.error('Error parsing line:', { line: line.substring(0, 100), error: e.message });
+                // 继续处理其他行
               }
             }
           }
-          
+
+          // 发送结束标记
+          const finalData = {
+            id: `chatcmpl-${crypto.randomUUID()}`,
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model,
+            choices: [{
+              index: 0,
+              delta: {},
+              finish_reason: 'stop'
+            }]
+          };
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(finalData)}\n\n`));
           controller.enqueue(encoder.encode('data: [DONE]\n\n'));
           controller.close();
         } catch (error) {
+          self.logger.error('Stream response error:', error);
           controller.error(error);
         }
       }
@@ -313,46 +437,96 @@ export class GrokApiHandler {
       headers: {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
       }
     });
   }
 
   processGrokResponse(data, model) {
     const result = { token: null, imageUrl: null };
-    
+
+    // 详细日志记录
+    this.logger.info('Processing Grok response:', {
+      model,
+      hasError: !!data.error,
+      hasResult: !!data.result,
+      dataKeys: Object.keys(data || {})
+    });
+
     if (data.error) {
       this.logger.error('Grok API error:', data.error);
+      result.token = `错误: ${data.error.message || JSON.stringify(data.error)}`;
       return result;
     }
-    
-    const response = data.result?.response;
-    if (!response) return result;
-    
-    // Handle different model types
-    if (model === 'grok-3') {
-      result.token = response.token;
-    } else if (model.includes('search')) {
-      if (response.webSearchResults && this.config.showSearchResults) {
-        result.token = `\r\n<think>${this.organizeSearchResults(response.webSearchResults)}</think>\r\n`;
-      } else {
-        result.token = response.token;
-      }
-    } else if (model.includes('reasoning')) {
-      if (response.isThinking && !this.config.showThinking) {
-        return result;
-      }
-      result.token = response.token;
-    } else if (model.includes('imageGen')) {
-      if (response.cachedImageGenerationResponse) {
-        result.imageUrl = response.cachedImageGenerationResponse.imageUrl;
-      } else {
-        result.token = response.token;
-      }
-    } else {
-      result.token = response.token;
+
+    // 尝试多种可能的响应结构
+    let response = data.result?.response || data.response || data;
+
+    if (!response) {
+      this.logger.warn('No response found in data:', data);
+      return result;
     }
-    
+
+    this.logger.info('Response structure:', {
+      hasToken: !!response.token,
+      hasWebSearchResults: !!response.webSearchResults,
+      hasImageGeneration: !!response.cachedImageGenerationResponse,
+      isThinking: !!response.isThinking,
+      responseKeys: Object.keys(response || {})
+    });
+
+    // Handle different model types with fallback
+    try {
+      if (model === 'grok-3' || model === 'grok-4') {
+        result.token = response.token || response.text || response.content;
+      } else if (model.includes('search')) {
+        if (response.webSearchResults && this.config.showSearchResults) {
+          result.token = `\r\n<think>${this.organizeSearchResults(response.webSearchResults)}</think>\r\n`;
+        } else {
+          result.token = response.token || response.text || response.content;
+        }
+      } else if (model.includes('reasoning')) {
+        if (response.isThinking && !this.config.showThinking) {
+          return result; // 跳过思考过程
+        }
+        result.token = response.token || response.text || response.content;
+      } else if (model.includes('imageGen')) {
+        if (response.cachedImageGenerationResponse) {
+          result.imageUrl = response.cachedImageGenerationResponse.imageUrl;
+        } else {
+          result.token = response.token || response.text || response.content;
+        }
+      } else {
+        // 通用处理
+        result.token = response.token || response.text || response.content || response.message;
+      }
+
+      // 如果仍然没有内容，尝试直接使用数据
+      if (!result.token && !result.imageUrl) {
+        if (typeof data === 'string') {
+          result.token = data;
+        } else if (data.choices && data.choices[0]) {
+          result.token = data.choices[0].delta?.content || data.choices[0].message?.content;
+        }
+      }
+
+    } catch (error) {
+      this.logger.error('Error processing response:', error);
+      result.token = `处理响应时出错: ${error.message}`;
+    }
+
+    if (result.token || result.imageUrl) {
+      this.logger.info('Successfully extracted content:', {
+        hasToken: !!result.token,
+        tokenLength: result.token?.length || 0,
+        hasImageUrl: !!result.imageUrl
+      });
+    } else {
+      this.logger.warn('No content extracted from response');
+    }
+
     return result;
   }
 
